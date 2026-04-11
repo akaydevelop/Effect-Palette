@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+data/current_selection.json
+data/premiere_cmd.json
+data/premiere_diagnose.txt
+data/premiere_effects.json
+data/premiere_presets.json
+data/premiere_project_items.json
+data/worker.log
+data/generic_item_templates.json
+
+.debug

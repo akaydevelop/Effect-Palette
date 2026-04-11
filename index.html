@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Effect Palette Debug</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", sans-serif;
+      font-size: 12px;
+      background: #1a1a1f;
+      color: #c8c8d0;
+      padding: 12px;
+      user-select: none;
+    }
+
+    h3 {
+      font-size: 11px;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+    }
+
+    #status-bar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      background: #0f0f11;
+      border: 1px solid #2a2a35;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+    }
+
+    #status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #3dd68c;
+      flex-shrink: 0;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.5; }
+    }
+
+    #status-text { color: #a0a0b0; font-size: 11px; flex: 1; }
+
+    .counters {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .counter-box {
+      background: #0f0f11;
+      border: 1px solid #2a2a35;
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+
+    .counter-box .num   { font-size: 20px; font-weight: 700; color: #5b6bf8; line-height: 1.1; }
+    .counter-box .label { font-size: 10px; color: #666; margin-top: 2px; }
+
+    .btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
+
+    button {
+      flex: 1; padding: 7px;
+      border: 1px solid #2a2a35; border-radius: 6px;
+      background: #1e1e28; color: #c8c8d0;
+      font-size: 11px; cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover  { background: #272736; border-color: #5b6bf8; }
+    button.primary { background: #2a2d5a; border-color: #5b6bf8; color: #a0aaff; }
+    button.primary:hover { background: #323672; }
+
+    #log {
+      background: #0f0f11;
+      border: 1px solid #2a2a35;
+      border-radius: 6px;
+      padding: 8px;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 10px;
+      color: #666;
+      height: 120px;
+      overflow-y: auto;
+      line-height: 1.6;
+      white-space: pre;
+    }
+
+    .ts { font-size: 10px; color: #444; }
+  </style>
+</head>
+<body>
+
+  <h3>Effect Palette — Debug</h3>
+
+  <div id="status-bar">
+    <div id="status-dot"></div>
+    <span id="status-text">Worker ativo</span>
+  </div>
+
+  <div class="counters">
+    <div class="counter-box">
+      <div class="num" id="count-effects">—</div>
+      <div class="label">efeitos exportados</div>
+    </div>
+    <div class="counter-box">
+      <div class="num" id="count-log-lines">0</div>
+      <div class="label">entradas no log</div>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button class="primary" onclick="refreshLog()">↺ Atualizar log</button>
+    <button onclick="clearLog()">✕ Limpar log</button>
+  </div>
+
+  <div id="log">Carregando worker.log...</div>
+
+  <script src="lib/CSInterface.js"></script>
+  <script>
+    const cs   = new CSInterface();
+    const fs   = window.require("fs");
+    const path = window.require("path");
+
+    const EXT_DIR      = cs.getSystemPath(SystemPath.EXTENSION);
+    const DATA_DIR     = path.join(EXT_DIR, "data");
+    const LOG_FILE     = path.join(DATA_DIR, "worker.log");
+    const EFFECTS_FILE = path.join(DATA_DIR, "premiere_effects.json");
+
+    function refreshLog() {
+      try {
+        if (fs.existsSync(LOG_FILE)) {
+          const content = fs.readFileSync(LOG_FILE, "utf8");
+          const lines   = content.trim().split("\n");
+          // Mostra as últimas 50 linhas
+          const recent  = lines.slice(-50).join("\n");
+          document.getElementById("log").textContent = recent;
+          document.getElementById("count-log-lines").textContent = lines.length;
+          // Scrolla para o fim
+          const logEl = document.getElementById("log");
+          logEl.scrollTop = logEl.scrollHeight;
+        } else {
+          document.getElementById("log").textContent = "worker.log não encontrado — worker está rodando?";
+        }
+      } catch(e) {
+        document.getElementById("log").textContent = "Erro ao ler log: " + e.message;
+      }
+
+      // Atualiza contagem de efeitos
+      try {
+        if (fs.existsSync(EFFECTS_FILE)) {
+          const data = JSON.parse(fs.readFileSync(EFFECTS_FILE, "utf8"));
+          document.getElementById("count-effects").textContent = data.effects.length;
+        }
+      } catch(e) {}
+    }
+
+    function clearLog() {
+      try {
+        if (fs.existsSync(LOG_FILE)) {
+          fs.writeFileSync(LOG_FILE, "", "utf8");
+          document.getElementById("log").textContent = "Log limpo.";
+          document.getElementById("count-log-lines").textContent = "0";
+        }
+      } catch(e) {}
+    }
+
+    // Atualiza automaticamente a cada 2 segundos
+    refreshLog();
+    setInterval(refreshLog, 2000);
+  </script>
+</body>
+</html>
