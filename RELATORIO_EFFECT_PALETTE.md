@@ -346,10 +346,10 @@ Observacao: algumas secoes antigas deste relatorio ficaram desatualizadas depois
 - Insercao de itens do projeto na timeline
 - Fallback para proxima track livre ao inserir item do projeto, com criacao de nova track quando necessario
 - Insercao de Adjustment Layer existente cobrindo a selecao quando multiplos clips estao selecionados
-- Categoria de itens genericos na paleta (`Adjustment Layer`, `Bars and Tone`, `Black Video`, `Color Matte`, `Transparent Video`, `Universal Counting Leader`)
+- Categoria de itens genericos na paleta (`Adjustment Layer`, `Bars and Tone`, `Black Video`, `Color Matte`, `Transparent Video`)
 - Criacao/insercao de itens genericos do Premiere
   - `Bars and Tone` via API oficial
-  - `Black Video`, `Color Matte`, `Transparent Video` e `Universal Counting Leader` via QE DOM
+  - `Black Video`, `Color Matte` e `Transparent Video` via QE DOM
 
 ### O que ainda esta pendente
 

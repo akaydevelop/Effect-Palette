@@ -5,7 +5,7 @@ Extensão CEP para Adobe Premiere Pro com uma paleta em Python para:
 - aplicar efeitos de vídeo e áudio
 - aplicar presets do Premiere
 - inserir itens do projeto na timeline
-- inserir itens genéricos do Premiere, como `Bars and Tone`, `Black Video` e `Transparent Video`
+- inserir itens genéricos do Premiere, como `Bars and Tone`, `Black Video`, `Color Matte` e `Transparent Video`
 
 ## Estrutura
 
@@ -24,7 +24,8 @@ Extensão CEP para Adobe Premiere Pro com uma paleta em Python para:
 ## Observações
 
 - Os arquivos gerados em `data/` não entram no Git.
-- A configuração local para importar `Adjustment Layer` por template fica em `data/generic_item_templates.json`.
+- A configuração local para importar `Adjustment Layer` por template fica em `data/generic_item_templates.json`, com múltiplas entradas por resolução.
+- `projectPath` pode ser relativo à pasta da extensão, o que facilita distribuição pública.
 - Um exemplo dessa configuração está em [data/generic_item_templates.example.json](C:\Users\Paulo\AppData\Roaming\Adobe\CEP\extensions\EffectPalette\data\generic_item_templates.example.json).
 
 ## Status atual

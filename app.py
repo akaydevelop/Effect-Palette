@@ -63,7 +63,6 @@ GENERIC_ITEMS = [
     {"name": "Black Video", "category": "Genéricos", "type": "generic_item", "genericKey": "black_video"},
     {"name": "Color Matte", "category": "Genéricos", "type": "generic_item", "genericKey": "color_matte"},
     {"name": "Transparent Video", "category": "Genéricos", "type": "generic_item", "genericKey": "transparent_video"},
-    {"name": "Universal Counting Leader", "category": "Genéricos", "type": "generic_item", "genericKey": "universal_counting_leader"},
 ]
 
 # ─── Cores da UI ──────────────────────────────────────────────────────────────

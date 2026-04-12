@@ -1,4 +1,4 @@
-/**
+﻿/**
  * host.jsx — ExtendScript
  */
 
@@ -166,6 +166,7 @@ function _collectProjectItemsRecursive(projectItem, out) {
   var isSequence = false;
   var mediaPath = "";
   var treePath = "";
+  var itemName = "";
 
   try { itemType = String(projectItem.type || ""); } catch (e0) {}
   try { isSequence = !!(typeof projectItem.isSequence === "function" && projectItem.isSequence()); } catch (e1) {}
@@ -175,6 +176,7 @@ function _collectProjectItemsRecursive(projectItem, out) {
       mediaPath = String(projectItem.getMediaPath() || "");
     }
   } catch (e3) {}
+  try { itemName = String(projectItem.name || ""); } catch (e4) {}
 
   var isInsertable = !!(
     isSequence ||
@@ -184,7 +186,18 @@ function _collectProjectItemsRecursive(projectItem, out) {
     itemType === "FILE"
   );
 
-  if (isInsertable) {
+  var isTemplateAsset = false;
+  if (
+    /(^|\\)template_project\.prproj(\\|$)/i.test(treePath) &&
+    (
+      /^(Adjustment Layer_\d+x\d+|AL_TEMPLATE_\d+x\d+)$/i.test(itemName) ||
+      /(^|\\)Adjustment Layers \[[^\\]+\](\\|$)/i.test(treePath)
+    )
+  ) {
+    isTemplateAsset = true;
+  }
+
+  if (isInsertable && !isTemplateAsset) {
     out.push({
       name: String(projectItem.name || ""),
       category: _projectTreeCategory(treePath),
@@ -245,6 +258,53 @@ function getProjectItemsListSafe() {
     });
 
     return JSON.stringify(items);
+  } catch (e) {
+    return "Error: " + e.message;
+  }
+}
+
+function getSequencesListSafe() {
+  try {
+    if (!app.project || !app.project.sequences) return "[]";
+
+    var sequences = [];
+    var total = 0;
+    try { total = app.project.sequences.numSequences || 0; } catch (e0) {}
+
+    for (var i = 0; i < total; i++) {
+      var sequence = app.project.sequences[i];
+      if (!sequence) continue;
+
+      var name = "";
+      var sequenceID = "";
+      var width = 0;
+      var height = 0;
+      var timebase = "";
+      var projectItemNodeId = "";
+
+      try { name = String(sequence.name || ""); } catch (e1) {}
+      try { sequenceID = String(sequence.sequenceID || ""); } catch (e2) {}
+      try { width = Number(sequence.frameSizeVertical) || 0; } catch (e3) {}
+      try { height = Number(sequence.frameSizeHorizontal) || 0; } catch (e4) {}
+      try { timebase = String(sequence.timebase || ""); } catch (e5) {}
+      try {
+        if (sequence.projectItem) {
+          projectItemNodeId = String(sequence.projectItem.nodeId || "");
+        }
+      } catch (e6) {}
+
+      sequences.push({
+        name: name,
+        sequenceID: sequenceID,
+        width: width,
+        height: height,
+        label: (width > 0 && height > 0) ? (width + "x" + height) : "",
+        timebase: timebase,
+        projectItemNodeId: projectItemNodeId
+      });
+    }
+
+    return JSON.stringify(sequences);
   } catch (e) {
     return "Error: " + e.message;
   }

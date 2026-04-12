@@ -1,4 +1,4 @@
-/**
+﻿/**
  * bridge.js
  * Funciona em dois contextos:
  *   worker.html  — headless, sem UI, carrega automaticamente com o Premiere
@@ -17,6 +17,7 @@ const DATA_DIR      = path.join(EXT_DIR, "data");
 const EFFECTS_FILE  = path.join(DATA_DIR, "premiere_effects.json");
 const PRESETS_FILE  = path.join(DATA_DIR, "premiere_presets.json");
 const PROJECT_ITEMS_FILE = path.join(DATA_DIR, "premiere_project_items.json");
+const SEQUENCES_FILE = path.join(DATA_DIR, "premiere_sequences.json");
 const CMD_FILE      = path.join(DATA_DIR, "premiere_cmd.json");
 const LOG_FILE      = path.join(DATA_DIR, "premiere_diagnose.txt");
 const WORKER_LOG_FILE = path.join(DATA_DIR, "worker.log");
@@ -483,6 +484,31 @@ function exportProjectItems(reason) {
   });
 }
 
+function exportSequences(reason) {
+  log("Exportando sequências" + (reason ? " (" + reason + ")" : "") + "...");
+
+  evalHostScript("getSequencesListSafe()", function(result) {
+    if (!result || result === "EvalScript error." || result.indexOf("Error") === 0) {
+      log("Erro ao exportar sequências: " + result, "err");
+      return;
+    }
+
+    try {
+      const sequences = JSON.parse(result);
+      const payload = {
+        version: 1,
+        exported_at: Date.now() / 1000,
+        sequences: sequences,
+      };
+
+      writeSafe(SEQUENCES_FILE, JSON.stringify(payload, null, 2));
+      log("✓ " + sequences.length + " sequência(s) exportada(s)", "ok");
+    } catch (e) {
+      log("Erro JSON em sequências: " + e.message, "err");
+    }
+  });
+}
+
 function maybeRefreshProjectItems() {
   const now = Date.now();
   if (projectItemsRefreshPending) return;
@@ -496,11 +522,13 @@ function maybeRefreshProjectItems() {
       if (normalized !== lastProjectIdentity) {
         lastProjectIdentity = normalized;
         exportProjectItems("projeto alterado");
+        exportSequences("projeto alterado");
         return;
       }
 
       if (now - lastProjectItemsRefreshAt >= PROJECT_ITEMS_REFRESH_INTERVAL_MS) {
         exportProjectItems("refresh periódico");
+        exportSequences("refresh periódico");
       }
     });
     return;
@@ -508,6 +536,7 @@ function maybeRefreshProjectItems() {
 
   if (now - lastProjectItemsRefreshAt >= PROJECT_ITEMS_REFRESH_INTERVAL_MS) {
     exportProjectItems("refresh periódico");
+    exportSequences("refresh periódico");
   }
 }
 
@@ -557,6 +586,7 @@ function startPolling() {
             exportEffects();
             exportPresets();
             exportProjectItems("manual");
+            exportSequences("manual");
             markCmdStatus("done");
           } else if (cmd.command === "diagnose") {
             markCmdStatus("processing");
@@ -813,6 +843,7 @@ function init() {
     exportEffects();
     exportPresets();
     exportProjectItems("startup");
+    exportSequences("startup");
     startPolling();
   }, 1500);
 }
