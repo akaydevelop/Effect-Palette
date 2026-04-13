@@ -64,6 +64,13 @@ app.py  ──writeSafe()──>  premiere_cmd.json  <──poll() 300ms──  
 - **Escrita segura de arquivos** com `writeSafe()` / `write_safe()` — grava em `.tmp` e renomeia atomicamente, eliminando race conditions com BSODs
 - **Foco inicial da janela Python corrigido** — a primeira abertura da paleta agora já entra pronta para digitação sem exigir clique manual
 - **Limpeza de logs no startup e por comando** — `worker.log` agora é podado automaticamente na inicialização quando cresce demais, e o comando de limpeza também apaga os logs
+- **Hotkey global estabilizado** — `Ctrl+Espaço`, `Ctrl+D` e `Ctrl+Q` agora usam guarda por combinação, evitando toggles repetidos por repetição de tecla/estado preso
+- **Aba Genéricos funcional**:
+  - `Adjustment Layer` com seleção automática por resolução
+  - fallback por `template_project` quando a layer não existe no projeto atual
+  - sequência-template usada só como veículo e apagada depois da importação
+  - `Bars and Tone`, `Black Video`, `Color Matte` e `Transparent Video` criados via API
+  - assets organizados no bin `EffectPalette_Assets`
 
 ### ⚠️ Parcialmente Funcionando (Bugs Conhecidos)
 
@@ -76,6 +83,49 @@ app.py  ──writeSafe()──>  premiere_cmd.json  <──poll() 300ms──  
 4. **Checkboxes de plugins de terceiros** — Mocha Pro e S_Shake (Sapphire) têm checkboxes com problema, provavelmente o mesmo bug do apóstrofo Unicode que já foi resolvido para o Transform — precisam do mapeamento `knownNames` no `bridge.js`.
 
 5. **Transform com valores padrão em preset com múltiplos efeitos** — quando um preset tem Transform + múltiplos Mirrors, o Transform às vezes é aplicado com valores padrão. Isso acontece porque o `effectIndices[0]` na Fase 2 aponta para um componente errado.
+
+---
+
+## Estado Atual — Itens do Projeto e Genéricos
+
+### Itens do Projeto
+
+- A paleta exporta e lista itens inseríveis do projeto ativo em `premiere_project_items.json`
+- A categoria **Projeto** permite inserir clips/sequências do bin diretamente na timeline
+- A inserção procura a próxima track livre no ponto atual
+- Se necessário, cria nova track via QE DOM
+- Para `Adjustment Layer` já existente no projeto, a inserção pode cobrir toda a seleção quando múltiplos clips estão selecionados
+
+### Genéricos
+
+- A categoria **Genéricos** atualmente expõe:
+  - `Adjustment Layer`
+  - `Bars and Tone`
+  - `Black Video`
+  - `Color Matte`
+  - `Transparent Video`
+- `Bars and Tone`, `Black Video`, `Color Matte` e `Transparent Video` são criados via API/QE
+- `Adjustment Layer` usa:
+  1. busca por `Adjustment Layer_WxH` já existente no projeto
+  2. fallback por template (`template_project/template_project.prproj`)
+  3. importação seletiva por `importSequences(...)`
+  4. remoção da sequência-template após localizar a layer
+- Os assets criados/importados são organizados em `EffectPalette_Assets`
+
+### Template de Adjustment Layer
+
+- O arquivo `data/generic_item_templates.json` define os templates disponíveis
+- O projeto-template fica dentro da própria extensão, em `template_project/template_project.prproj`
+- O sistema já suporta múltiplas resoluções e proporções:
+  - horizontal
+  - vertical
+  - `1:1`
+  - `4:3`
+- A escolha do template é feita por resolução mais próxima da sequência ativa
+
+### Próximo refinamento sugerido
+
+- Evoluir a aba **Genéricos** para uma aba de **assets/favoritos**, permitindo que o usuário mantenha assets curados no `template_project` além dos genéricos nativos
 
 ---
 

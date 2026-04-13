@@ -17,6 +17,7 @@ const DATA_DIR      = path.join(EXT_DIR, "data");
 const EFFECTS_FILE  = path.join(DATA_DIR, "premiere_effects.json");
 const PRESETS_FILE  = path.join(DATA_DIR, "premiere_presets.json");
 const PROJECT_ITEMS_FILE = path.join(DATA_DIR, "premiere_project_items.json");
+const FAVORITES_FILE = path.join(DATA_DIR, "premiere_favorites.json");
 const SEQUENCES_FILE = path.join(DATA_DIR, "premiere_sequences.json");
 const CMD_FILE      = path.join(DATA_DIR, "premiere_cmd.json");
 const LOG_FILE      = path.join(DATA_DIR, "premiere_diagnose.txt");
@@ -509,6 +510,34 @@ function exportSequences(reason) {
   });
 }
 
+function exportFavorites(reason) {
+  log("Exportando favoritos" + (reason ? " (" + reason + ")" : "") + "...");
+
+  evalHostScript("getTemplateFavoritesListSafe()", function(result) {
+    if (!result || result === "EvalScript error." || result.indexOf("Error") === 0) {
+      log("Erro ao exportar favoritos: " + result, "err");
+      return;
+    }
+
+    try {
+      const payload = JSON.parse(result);
+      if (!payload || !payload.rootFound) {
+        return;
+      }
+
+      writeSafe(FAVORITES_FILE, JSON.stringify({
+        version: 1,
+        exported_at: Date.now() / 1000,
+        sourceProjectPath: payload.sourceProjectPath || "",
+        items: payload.items || [],
+      }, null, 2));
+      log("✓ " + ((payload.items || []).length) + " favorito(s) exportado(s)", "ok");
+    } catch (e) {
+      log("Erro JSON em favoritos: " + e.message, "err");
+    }
+  });
+}
+
 function maybeRefreshProjectItems() {
   const now = Date.now();
   if (projectItemsRefreshPending) return;
@@ -522,12 +551,14 @@ function maybeRefreshProjectItems() {
       if (normalized !== lastProjectIdentity) {
         lastProjectIdentity = normalized;
         exportProjectItems("projeto alterado");
+        exportFavorites("projeto alterado");
         exportSequences("projeto alterado");
         return;
       }
 
       if (now - lastProjectItemsRefreshAt >= PROJECT_ITEMS_REFRESH_INTERVAL_MS) {
         exportProjectItems("refresh periódico");
+        exportFavorites("refresh periódico");
         exportSequences("refresh periódico");
       }
     });
@@ -536,6 +567,7 @@ function maybeRefreshProjectItems() {
 
   if (now - lastProjectItemsRefreshAt >= PROJECT_ITEMS_REFRESH_INTERVAL_MS) {
     exportProjectItems("refresh periódico");
+    exportFavorites("refresh periódico");
     exportSequences("refresh periódico");
   }
 }
@@ -581,11 +613,14 @@ function startPolling() {
             insertProjectItem(cmd);
           } else if (cmd.command === "insertGenericItem") {
             insertGenericItem(cmd);
+          } else if (cmd.command === "insertFavoriteItem") {
+            insertFavoriteItem(cmd);
           } else if (cmd.command === "exportEffects") {
             markCmdStatus("processing");
             exportEffects();
             exportPresets();
             exportProjectItems("manual");
+            exportFavorites("manual");
             exportSequences("manual");
             markCmdStatus("done");
           } else if (cmd.command === "diagnose") {
@@ -795,6 +830,61 @@ function insertGenericItem(cmd) {
   });
 }
 
+function insertFavoriteItem(cmd) {
+  const itemName = cmd.itemName;
+  const mediaPath = cmd.mediaPath || "";
+  const sequenceID = cmd.sequenceID || "";
+  const favoriteType = cmd.favoriteType || "";
+  const sourceProjectPath = cmd.sourceProjectPath || "";
+
+  log("→ Inserindo favorito: " + itemName, "apply");
+  setStatus("Inserindo: " + itemName, "waiting");
+  markCmdStatus("processing");
+
+  const script = 'insertFavoriteItemAtPlayhead(' +
+    JSON.stringify(itemName) + ', ' +
+    JSON.stringify(mediaPath) + ', ' +
+    JSON.stringify(sequenceID) + ', ' +
+    JSON.stringify(favoriteType) + ', ' +
+    JSON.stringify(sourceProjectPath) + ', ' +
+    JSON.stringify(lastSelectionJSON) + ')';
+
+  evalHostScript(script, function(result) {
+    if (result === "ok") {
+      appliedCount++;
+      updateCount("count-applied", appliedCount);
+      setStatus("Conectado", "ok");
+      log("✓ Favorito inserido: " + itemName, "ok");
+      markCmdStatus("done");
+      exportProjectItems("favorito inserido");
+    } else if (result === "template_missing") {
+      setStatus("Template ausente", "waiting");
+      log("⚠ Projeto template não configurado para favoritos", "warn");
+      markCmdStatus("error_template_missing");
+    } else if (result === "create_failed") {
+      setStatus("Falha ao importar favorito", "error");
+      log("⚠ Premiere não conseguiu importar este favorito", "warn");
+      markCmdStatus("error_create_failed");
+    } else if (result === "not_supported") {
+      setStatus("Favorito não suportado", "waiting");
+      log("⚠ Este favorito ainda não é suportado pela extensão", "warn");
+      markCmdStatus("error_not_supported");
+    } else if (result === "not_found") {
+      setStatus("Favorito não encontrado", "waiting");
+      log("⚠ Favorito não encontrado: " + itemName, "warn");
+      markCmdStatus("error_not_found");
+    } else if (result === "no_sequence") {
+      setStatus("Sem sequência ativa", "waiting");
+      log("⚠ Nenhuma sequência ativa para inserir favorito", "warn");
+      markCmdStatus("error_no_sequence");
+    } else {
+      setStatus("Erro ao inserir favorito", "error");
+      log("Erro: " + result, "err");
+      markCmdStatus("error");
+    }
+  });
+}
+
 function markCmdStatus(status) {
   try {
     if (fs.existsSync(CMD_FILE)) {
@@ -843,6 +933,7 @@ function init() {
     exportEffects();
     exportPresets();
     exportProjectItems("startup");
+    exportFavorites("startup");
     exportSequences("startup");
     startPolling();
   }, 1500);

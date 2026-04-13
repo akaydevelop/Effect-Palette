@@ -9,10 +9,12 @@ data/current_selection.json
 data/premiere_cmd.json
 data/premiere_diagnose.txt
 data/premiere_effects.json
+data/premiere_favorites.json
 data/premiere_presets.json
 data/premiere_project_items.json
 data/premiere_sequences.json
 data/worker.log
-data/generic_item_templates.json
 
 .debug
+template_project/*.prin
+template_project/Adobe Premiere Pro Auto-Save/

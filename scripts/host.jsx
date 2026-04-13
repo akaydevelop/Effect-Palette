@@ -310,6 +310,173 @@ function getSequencesListSafe() {
   }
 }
 
+function _findBinByName(projectItem, targetName) {
+  if (!projectItem || !targetName) return null;
+
+  var itemName = "";
+  var itemType = "";
+  try { itemName = String(projectItem.name || ""); } catch (e0) {}
+  try { itemType = String(projectItem.type || ""); } catch (e1) {}
+  if (itemName === targetName && (itemType === "2" || itemType === "BIN")) {
+    return projectItem;
+  }
+
+  try {
+    if (projectItem.children && projectItem.children.numItems) {
+      for (var i = 0; i < projectItem.children.numItems; i++) {
+        var found = _findBinByName(projectItem.children[i], targetName);
+        if (found) return found;
+      }
+    }
+  } catch (e2) {}
+
+  return null;
+}
+
+function _favoriteCategoryLabel(parts) {
+  if (!parts || !parts.length) return "Favoritos";
+  return "Favoritos > " + parts.join(" > ");
+}
+
+function _collectFavoriteItemsRecursive(projectItem, pathParts, out, sourceProjectPath) {
+  if (!projectItem || !out) return;
+
+  var itemName = "";
+  var itemType = "";
+  var isSequence = false;
+  var mediaPath = "";
+  var sequenceID = "";
+  try { itemName = String(projectItem.name || ""); } catch (e0) {}
+  try { itemType = String(projectItem.type || ""); } catch (e1) {}
+  try { isSequence = !!(typeof projectItem.isSequence === "function" && projectItem.isSequence()); } catch (e2) {}
+  try {
+    if (typeof projectItem.getMediaPath === "function") {
+      mediaPath = String(projectItem.getMediaPath() || "");
+    }
+  } catch (e3) {}
+
+  if (isSequence) {
+    var total = 0;
+    try { total = app.project.sequences ? (app.project.sequences.numSequences || 0) : 0; } catch (e4) {}
+    for (var si = 0; si < total; si++) {
+      var sequence = null;
+      try { sequence = app.project.sequences[si]; } catch (e5) {}
+      if (!sequence || !sequence.projectItem) continue;
+      if (sequence.projectItem !== projectItem) continue;
+      try { sequenceID = String(sequence.sequenceID || ""); } catch (e6) {}
+      break;
+    }
+  }
+
+  var favoriteType = "";
+  if (isSequence && sequenceID) {
+    favoriteType = "sequence";
+  } else if (mediaPath) {
+    favoriteType = "media";
+  }
+
+  if (favoriteType) {
+    out.push({
+      name: itemName,
+      category: _favoriteCategoryLabel(pathParts),
+      favoriteType: favoriteType,
+      sourceProjectPath: sourceProjectPath || "",
+      sourceTreePath: String(projectItem.treePath || ""),
+      mediaPath: mediaPath,
+      sequenceID: sequenceID,
+      isSequence: isSequence,
+      itemType: itemType
+    });
+  }
+
+  try {
+    if (projectItem.children && projectItem.children.numItems) {
+      for (var i = 0; i < projectItem.children.numItems; i++) {
+        var child = projectItem.children[i];
+        if (!child) continue;
+
+        var childType = "";
+        var childName = "";
+        try { childType = String(child.type || ""); } catch (e7) {}
+        try { childName = String(child.name || ""); } catch (e8) {}
+
+        if (childType === "2" || childType === "BIN") {
+          var nextParts = pathParts ? pathParts.slice(0) : [];
+          if (childName) nextParts.push(childName);
+          _collectFavoriteItemsRecursive(child, nextParts, out, sourceProjectPath);
+        } else {
+          _collectFavoriteItemsRecursive(child, pathParts, out, sourceProjectPath);
+        }
+      }
+    }
+  } catch (e9) {}
+}
+
+function getTemplateFavoritesListSafe() {
+  try {
+    if (!app.project || !app.project.rootItem) {
+      return JSON.stringify({ rootFound: false, items: [] });
+    }
+
+    var currentProjectPath = "";
+    try { currentProjectPath = String(app.project.path || ""); } catch (ePre0) {}
+    var expectedTemplatePath = _resolveTemplateProjectPath("");
+    var normalizedCurrentProjectPath = String(currentProjectPath || "").replace(/\\/g, "/").toLowerCase();
+    var normalizedExpectedTemplatePath = String(expectedTemplatePath || "").replace(/\\/g, "/").toLowerCase();
+    if (!normalizedCurrentProjectPath || !normalizedExpectedTemplatePath || normalizedCurrentProjectPath !== normalizedExpectedTemplatePath) {
+      return JSON.stringify({ rootFound: false, items: [] });
+    }
+
+    var rootBin = _findBinByName(app.project.rootItem, "EffectPalette_Favorites");
+    if (!rootBin) {
+      return JSON.stringify({ rootFound: false, items: [] });
+    }
+
+    var items = [];
+    var sourceProjectPath = currentProjectPath;
+
+    try {
+      if (rootBin.children && rootBin.children.numItems) {
+        for (var i = 0; i < rootBin.children.numItems; i++) {
+          var child = rootBin.children[i];
+          if (!child) continue;
+
+          var childType = "";
+          var childName = "";
+          try { childType = String(child.type || ""); } catch (e1) {}
+          try { childName = String(child.name || ""); } catch (e2) {}
+
+          if (childType === "2" || childType === "BIN") {
+            _collectFavoriteItemsRecursive(child, childName ? [childName] : [], items, sourceProjectPath);
+          } else {
+            _collectFavoriteItemsRecursive(child, [], items, sourceProjectPath);
+          }
+        }
+      }
+    } catch (e3) {}
+
+    items.sort(function(a, b) {
+      var ac = String(a.category || "").toLowerCase();
+      var bc = String(b.category || "").toLowerCase();
+      if (ac < bc) return -1;
+      if (ac > bc) return 1;
+      var an = String(a.name || "").toLowerCase();
+      var bn = String(b.name || "").toLowerCase();
+      if (an < bn) return -1;
+      if (an > bn) return 1;
+      return 0;
+    });
+
+    return JSON.stringify({
+      rootFound: true,
+      sourceProjectPath: sourceProjectPath,
+      items: items
+    });
+  } catch (e) {
+    return "Error: " + e.message;
+  }
+}
+
 function _findProjectItemByNodeId(projectItem, nodeId) {
   if (!projectItem || !nodeId) return null;
 
@@ -751,6 +918,77 @@ function _findFirstProjectItemMatching(matcher) {
   return matches.length ? matches[0] : null;
 }
 
+function _ensureEffectPaletteAssetsBin() {
+  if (!app.project || !app.project.rootItem) return null;
+
+  var existing = _findFirstProjectItemMatching(function(item) {
+    var name = "";
+    var itemType = "";
+    try { name = String(item.name || ""); } catch (e0) {}
+    try { itemType = String(item.type || ""); } catch (e1) {}
+    return name === "EffectPalette_Assets" && (itemType === "2" || itemType === "BIN");
+  });
+  if (existing) return existing;
+
+  try {
+    return app.project.rootItem.createBin("EffectPalette_Assets");
+  } catch (e2) {
+    return null;
+  }
+}
+
+function _moveProjectItemToBin(projectItem, targetBin) {
+  if (!projectItem || !targetBin || projectItem === targetBin) return;
+  try {
+    if (typeof projectItem.moveBin === "function") {
+      projectItem.moveBin(targetBin);
+    }
+  } catch (e) {}
+}
+
+function _organizeGenericAsset(projectItem) {
+  if (!projectItem) return projectItem;
+  var assetsBin = _ensureEffectPaletteAssetsBin();
+  _moveProjectItemToBin(projectItem, assetsBin);
+  return projectItem;
+}
+
+function _deleteSequenceIfPossible(sequence) {
+  if (!sequence || !app.project || typeof app.project.deleteSequence !== "function") return false;
+  try {
+    return !!app.project.deleteSequence(sequence);
+  } catch (e) {
+    return false;
+  }
+}
+
+function _deleteImportedTemplateSequences(templateName, preserveSequence) {
+  if (!templateName || !app.project || !app.project.sequences) return 0;
+
+  var deleted = 0;
+  var activeSequence = null;
+  try { activeSequence = app.project.activeSequence || null; } catch (e0) {}
+
+  var total = 0;
+  try { total = app.project.sequences.numSequences || 0; } catch (e1) {}
+
+  for (var i = total - 1; i >= 0; i--) {
+    var sequence = null;
+    try { sequence = app.project.sequences[i]; } catch (e2) {}
+    if (!sequence) continue;
+    if (preserveSequence && sequence === preserveSequence) continue;
+    if (activeSequence && sequence === activeSequence) continue;
+
+    var seqName = "";
+    try { seqName = String(sequence.name || ""); } catch (e3) {}
+    if (seqName !== templateName) continue;
+
+    if (_deleteSequenceIfPossible(sequence)) deleted++;
+  }
+
+  return deleted;
+}
+
 function _findFirstNewInsertableProjectItem(beforeRootCount) {
   if (!app.project || !app.project.rootItem) return null;
   var root = app.project.rootItem;
@@ -788,6 +1026,24 @@ function _findAdjustmentLayerProjectItem() {
   });
 }
 
+function _expectedAdjustmentLayerName(width, height) {
+  var w = Number(width) || 0;
+  var h = Number(height) || 0;
+  if (!w || !h) return "";
+  return "Adjustment Layer_" + w + "x" + h;
+}
+
+function _findAdjustmentLayerProjectItemBySize(width, height) {
+  var expectedName = _expectedAdjustmentLayerName(width, height);
+  if (!expectedName) return null;
+
+  return _findFirstProjectItemMatching(function(item) {
+    var name = "";
+    try { name = String(item.name || ""); } catch (e) {}
+    return name === expectedName;
+  });
+}
+
 function _findGenericProjectItem(genericKey) {
   var patterns = {
     adjustment_layer: /adjustment layer/i,
@@ -805,6 +1061,98 @@ function _findGenericProjectItem(genericKey) {
   });
 }
 
+function _findProjectItemByMediaPath(mediaPath) {
+  if (!mediaPath) return null;
+
+  return _findFirstProjectItemMatching(function(item) {
+    var candidatePath = "";
+    try {
+      if (typeof item.getMediaPath === "function") {
+        candidatePath = String(item.getMediaPath() || "");
+      }
+    } catch (e) {}
+    return candidatePath && String(candidatePath) === String(mediaPath);
+  });
+}
+
+function _findSequenceProjectItemByName(sequenceName) {
+  if (!sequenceName || !app.project || !app.project.sequences) return null;
+
+  var total = 0;
+  try { total = app.project.sequences.numSequences || 0; } catch (e0) {}
+  for (var i = 0; i < total; i++) {
+    var sequence = null;
+    try { sequence = app.project.sequences[i]; } catch (e1) {}
+    if (!sequence || !sequence.projectItem) continue;
+
+    var currentName = "";
+    try { currentName = String(sequence.name || ""); } catch (e2) {}
+    if (currentName === String(sequenceName)) return sequence.projectItem;
+  }
+
+  return null;
+}
+
+function _resolveTemplateProjectPath(rawProjectPath) {
+  var rootPath = _extensionRootFsPath();
+  if (!rootPath) return "";
+
+  var resolved = String(rawProjectPath || "");
+  if (!resolved) {
+    resolved = "template_project/template_project.prproj";
+  }
+
+  if (resolved.indexOf(":") < 0 && resolved.indexOf("/") !== 0 && resolved.indexOf("\\") !== 0) {
+    resolved = rootPath + "/" + resolved;
+  }
+
+  return resolved;
+}
+
+function _importFavoriteProjectItem(itemName, mediaPath, sequenceID, favoriteType, sourceProjectPath) {
+  var assetsBin = _ensureEffectPaletteAssetsBin() || (app.project ? app.project.rootItem : null);
+
+  if (favoriteType === "sequence" || sequenceID) {
+    var existingSequenceItem = _findSequenceProjectItemByName(itemName);
+    if (existingSequenceItem) return _organizeGenericAsset(existingSequenceItem);
+
+    var projectPath = _resolveTemplateProjectPath(sourceProjectPath);
+    if (!projectPath) return "template_missing";
+
+    var beforeRootCount = app.project.rootItem.children.numItems;
+    var importResult = app.project.importSequences(projectPath, [String(sequenceID || "")]);
+    if (importResult !== 0 && importResult !== true) return "create_failed";
+
+    try {
+      for (var i = beforeRootCount; i < app.project.rootItem.children.numItems; i++) {
+        var candidate = app.project.rootItem.children[i];
+        if (!candidate) continue;
+        _moveProjectItemToBin(candidate, assetsBin);
+      }
+    } catch (e0) {}
+
+    var importedSequenceItem = _findSequenceProjectItemByName(itemName);
+    return importedSequenceItem ? _organizeGenericAsset(importedSequenceItem) : "not_found";
+  }
+
+  if (favoriteType === "media" || mediaPath) {
+    var existingMediaItem = _findProjectItemByMediaPath(mediaPath);
+    if (existingMediaItem) return _organizeGenericAsset(existingMediaItem);
+
+    try {
+      var importFileResult = app.project.importFiles([String(mediaPath || "")], true, assetsBin, false);
+      if (importFileResult !== 0 && importFileResult !== true) return "create_failed";
+    } catch (e1) {
+      return "create_failed";
+    }
+
+    var importedMediaItem = _findProjectItemByMediaPath(mediaPath);
+    return importedMediaItem ? _organizeGenericAsset(importedMediaItem) : "not_found";
+  }
+
+  return "not_supported";
+}
+
 function _importAdjustmentLayerFromTemplate() {
   var rootPath = _extensionRootFsPath();
   if (!rootPath) return "template_missing";
@@ -813,26 +1161,118 @@ function _importAdjustmentLayerFromTemplate() {
   if (!config || !config.adjustmentLayer) return "template_missing";
 
   var template = config.adjustmentLayer;
-  var projectPath = String(template.projectPath || "");
-  var sequenceIDs = template.sequenceIDs || [];
-  if (!projectPath || !sequenceIDs.length) return "template_missing";
+  var rawProjectPath = String(template.projectPath || "");
+  if (!rawProjectPath) return "template_missing";
+
+  var projectPath = rawProjectPath;
+  if (rawProjectPath.indexOf(":") < 0 && rawProjectPath.indexOf("/") !== 0 && rawProjectPath.indexOf("\\") !== 0) {
+    projectPath = rootPath + "/" + rawProjectPath;
+  }
+
+  var chosenWidth = 0;
+  var chosenHeight = 0;
+  var chosenTemplateName = "";
+  var sequenceIDs = [];
+  var settings = _getSequenceCreateSettings(app.project.activeSequence);
+  var targetWidth = Number(settings.width) || 0;
+  var targetHeight = Number(settings.height) || 0;
+
+  if (template.templates && template.templates.length) {
+    var bestIndex = -1;
+    var bestScore = -1;
+    for (var ti = 0; ti < template.templates.length; ti++) {
+      var entry = template.templates[ti];
+      if (!entry) continue;
+      var entrySequenceID = String(entry.sequenceID || "");
+      if (!entrySequenceID) continue;
+
+      var entryWidth = Number(entry.width) || 0;
+      var entryHeight = Number(entry.height) || 0;
+      var score = Math.abs(entryWidth - targetWidth) + Math.abs(entryHeight - targetHeight);
+
+      if (bestIndex < 0 || score < bestScore) {
+        bestIndex = ti;
+        bestScore = score;
+      }
+    }
+
+    if (bestIndex >= 0) {
+      chosenWidth = Number(template.templates[bestIndex].width) || 0;
+      chosenHeight = Number(template.templates[bestIndex].height) || 0;
+      chosenTemplateName = String(template.templates[bestIndex].name || "");
+      sequenceIDs = [String(template.templates[bestIndex].sequenceID || "")];
+    }
+  } else {
+    sequenceIDs = template.sequenceIDs || [];
+  }
+
+  if (!sequenceIDs.length || !sequenceIDs[0]) return "template_missing";
+
+  if (chosenWidth && chosenHeight) {
+    var existingSizedLayer = _findAdjustmentLayerProjectItemBySize(chosenWidth, chosenHeight);
+    if (existingSizedLayer) return existingSizedLayer;
+  }
 
   var beforeRootCount = app.project.rootItem.children.numItems;
+  var beforeSequenceCount = 0;
+  var importedSequences = [];
+  try {
+    beforeSequenceCount = app.project.sequences ? (app.project.sequences.numSequences || 0) : 0;
+  } catch (seqCountErr) {}
   var importResult = app.project.importSequences(projectPath, sequenceIDs);
   if (importResult !== 0 && importResult !== true) return "create_failed";
 
+  var assetsBin = _ensureEffectPaletteAssetsBin();
+
+  try {
+    var totalSequences = app.project.sequences ? (app.project.sequences.numSequences || 0) : 0;
+    for (var si = beforeSequenceCount; si < totalSequences; si++) {
+      var importedSequence = app.project.sequences[si];
+      if (!importedSequence) continue;
+
+      if (!chosenTemplateName || String(importedSequence.name || "") === chosenTemplateName) {
+        importedSequences.push(importedSequence);
+      }
+    }
+  } catch (moveSeqErr) {}
+
+  var resolvedItem = null;
   for (var i = beforeRootCount; i < app.project.rootItem.children.numItems; i++) {
     var candidate = app.project.rootItem.children[i];
     if (!candidate) continue;
 
+    _moveProjectItemToBin(candidate, assetsBin);
+
     var matches = [];
     _collectProjectItemsMatching(candidate, function(item) {
+      if (chosenWidth && chosenHeight) {
+        var expectedName = _expectedAdjustmentLayerName(chosenWidth, chosenHeight);
+        var itemName = "";
+        try { itemName = String(item.name || ""); } catch (e) {}
+        return itemName === expectedName;
+      }
       return _matchesProjectItemName(item, /adjustment layer/i);
     }, matches);
-    if (matches.length) return matches[0];
+    if (matches.length) {
+      resolvedItem = matches[0];
+      break;
+    }
   }
 
-  return _findAdjustmentLayerProjectItem() || "not_found";
+  if (!resolvedItem) {
+    resolvedItem =
+      (chosenWidth && chosenHeight ? _findAdjustmentLayerProjectItemBySize(chosenWidth, chosenHeight) : null) ||
+      null;
+  }
+
+  for (var ds = importedSequences.length - 1; ds >= 0; ds--) {
+    _deleteSequenceIfPossible(importedSequences[ds]);
+  }
+  if (chosenTemplateName) {
+    _deleteImportedTemplateSequences(chosenTemplateName, null);
+  }
+
+  return resolvedItem || "not_found";
 }
 
 function _createGenericProjectItem(genericKey, sequence) {
@@ -840,7 +1280,12 @@ function _createGenericProjectItem(genericKey, sequence) {
   var beforeRootCount = app.project.rootItem.children.numItems;
 
   if (genericKey === "adjustment_layer") {
-    return _findAdjustmentLayerProjectItem() || _importAdjustmentLayerFromTemplate();
+    return (
+      _findAdjustmentLayerProjectItemBySize(settings.width, settings.height) ||
+      _importAdjustmentLayerFromTemplate() ||
+      _findAdjustmentLayerProjectItem() ||
+      "not_found"
+    );
   }
 
   var existingGeneric = _findGenericProjectItem(genericKey);
@@ -848,7 +1293,7 @@ function _createGenericProjectItem(genericKey, sequence) {
 
   if (genericKey === "bars_and_tone") {
     try {
-      return app.project.newBarsAndTone(
+      return _organizeGenericAsset(app.project.newBarsAndTone(
         settings.width,
         settings.height,
         settings.timeBase,
@@ -856,7 +1301,7 @@ function _createGenericProjectItem(genericKey, sequence) {
         settings.parDen,
         settings.audioSampleRate,
         "Bars and Tone"
-      ) || "create_failed";
+      )) || "create_failed";
     } catch (barsErr) {
       return "create_failed";
     }
@@ -881,7 +1326,7 @@ function _createGenericProjectItem(genericKey, sequence) {
     return "create_failed";
   }
 
-  return _findFirstNewInsertableProjectItem(beforeRootCount) || "not_found";
+  return _organizeGenericAsset(_findFirstNewInsertableProjectItem(beforeRootCount)) || "not_found";
 }
 
 function _projectItemShouldSpanSelection(projectItem, explicitGenericKey) {
@@ -1080,6 +1525,24 @@ function insertGenericItemAtPlayhead(genericKey, selectionJSON) {
     if (projectItem === "not_found" || !projectItem) return "not_found";
 
     return _insertResolvedProjectItem(sequence, projectItem, selectionJSON, genericKey);
+  } catch (e) {
+    return "Error: " + e.message;
+  }
+}
+
+function insertFavoriteItemAtPlayhead(itemName, mediaPath, sequenceID, favoriteType, sourceProjectPath, selectionJSON) {
+  try {
+    var sequence = app.project.activeSequence;
+    if (!sequence) return "no_sequence";
+    if (!app.project || !app.project.rootItem) return "not_found";
+
+    var projectItem = _importFavoriteProjectItem(itemName, mediaPath, sequenceID, favoriteType, sourceProjectPath);
+    if (projectItem === "template_missing") return "template_missing";
+    if (projectItem === "create_failed") return "create_failed";
+    if (projectItem === "not_supported") return "not_supported";
+    if (projectItem === "not_found" || !projectItem) return "not_found";
+
+    return _insertResolvedProjectItem(sequence, projectItem, selectionJSON, "");
   } catch (e) {
     return "Error: " + e.message;
   }

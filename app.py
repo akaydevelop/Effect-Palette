@@ -1,8 +1,8 @@
-"""
+﻿"""
 Premiere Pro Effect Palette
-Atalho: Ctrl+Espaço — abre a paleta de efeitos
+Atalho: Ctrl+Espaco - abre a paleta de efeitos
 
-A lista de efeitos é lida dinamicamente de um JSON exportado pela CEP Extension,
+A lista de efeitos e lida dinamicamente de um JSON exportado pela CEP Extension,
 incluindo plugins de terceiros (Boris FX, Maxon, etc.) e presets customizados.
 """
 
@@ -21,33 +21,34 @@ try:
     HAS_PYGETWINDOW = True
 except ImportError:
     HAS_PYGETWINDOW = False
-    print("[Aviso] pygetwindow não instalado — atalho funcionará em qualquer janela")
+    print("[Aviso] pygetwindow nao instalado - atalho funcionara em qualquer janela")
 
-# ─── Configurações ────────────────────────────────────────────────────────────
+# â”€â”€â”€ ConfiguraÃ§Ãµes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 TEMP = Path(os.environ.get("TEMP", "C:/Temp"))
 APPDATA = Path(os.environ.get("APPDATA", ""))
 
-# Pasta de dados dentro da extensão CEP — mesmo lugar que o bridge.js grava
+# Pasta de dados dentro da extensÃ£o CEP â€” mesmo lugar que o bridge.js grava
 EXT_DATA = APPDATA / "Adobe" / "CEP" / "extensions" / "EffectPalette" / "data"
 
 # JSON gravado pela CEP Extension com todos os efeitos do Premiere
 EFFECTS_FILE = EXT_DATA / "premiere_effects.json"
 
-# JSON com presets do usuário parseados do .prfpset
+# JSON com presets do usuÃ¡rio parseados do .prfpset
 PRESETS_FILE = EXT_DATA / "premiere_presets.json"
 
 # JSON com itens do projeto exportados do Premiere
 PROJECT_ITEMS_FILE = EXT_DATA / "premiere_project_items.json"
+FAVORITES_FILE = EXT_DATA / "premiere_favorites.json"
 
 # JSON de comando (lido pela CEP Extension para aplicar efeito)
 BRIDGE_FILE  = EXT_DATA / "premiere_cmd.json"
 SELECTION_FILE = EXT_DATA / "current_selection.json"
 
-# Intervalo de verificação de mudanças no arquivo de efeitos (segundos)
+# Intervalo de verificaÃ§Ã£o de mudanÃ§as no arquivo de efeitos (segundos)
 WATCH_INTERVAL = 3.0
 
-# Efeitos de fallback — usados quando o Premiere não está aberto
+# Efeitos de fallback â€” usados quando o Premiere nÃ£o estÃ¡ aberto
 FALLBACK_EFFECTS = [
     {"name": "Lumetri Color",       "category": "Color"},
     {"name": "Gaussian Blur",       "category": "Blur"},
@@ -58,14 +59,17 @@ FALLBACK_EFFECTS = [
 ]
 
 GENERIC_ITEMS = [
-    {"name": "Adjustment Layer", "category": "Genéricos", "type": "generic_item", "genericKey": "adjustment_layer"},
-    {"name": "Bars and Tone", "category": "Genéricos", "type": "generic_item", "genericKey": "bars_and_tone"},
-    {"name": "Black Video", "category": "Genéricos", "type": "generic_item", "genericKey": "black_video"},
-    {"name": "Color Matte", "category": "Genéricos", "type": "generic_item", "genericKey": "color_matte"},
-    {"name": "Transparent Video", "category": "Genéricos", "type": "generic_item", "genericKey": "transparent_video"},
+    {"name": "Adjustment Layer", "category": "Favoritos", "type": "generic_item", "genericKey": "adjustment_layer"},
+    {"name": "Bars and Tone", "category": "Favoritos", "type": "generic_item", "genericKey": "bars_and_tone"},
+    {"name": "Black Video", "category": "Favoritos", "type": "generic_item", "genericKey": "black_video"},
+    {"name": "Color Matte", "category": "Favoritos", "type": "generic_item", "genericKey": "color_matte"},
+    {"name": "Transparent Video", "category": "Favoritos", "type": "generic_item", "genericKey": "transparent_video"},
 ]
 
-# ─── Cores da UI ──────────────────────────────────────────────────────────────
+# â”€â”€â”€ Cores da UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+for _generic_item in GENERIC_ITEMS:
+    _generic_item["category"] = "Favoritos"
 
 BG         = "#0F0F11"
 BG2        = "#1A1A1F"
@@ -94,11 +98,11 @@ else:
     SW_RESTORE = 9
 
 
-# ─── Carregamento dinâmico de efeitos ─────────────────────────────────────────
+# â”€â”€â”€ Carregamento dinÃ¢mico de efeitos â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class EffectsLoader:
     """
-    Lê e monitora o arquivo premiere_effects.json gerado pela CEP Extension.
+    LÃª e monitora o arquivo premiere_effects.json gerado pela CEP Extension.
 
     Formato esperado do JSON:
     {
@@ -118,11 +122,13 @@ class EffectsLoader:
         self._effects: list = []
         self._presets: list = []
         self._project_items: list = []
+        self._favorite_items: list = []
         self._generic_items: list = list(GENERIC_ITEMS)
         self._all: list = []
         self._last_mtime: float = 0
         self._last_preset_mtime: float = 0
         self._last_project_items_mtime: float = 0
+        self._last_favorites_mtime: float = 0
         self._lock = threading.Lock()
         self._source = "fallback"
         self._load()
@@ -131,11 +137,13 @@ class EffectsLoader:
         """Carrega efeitos + presets dos arquivos ou usa fallback."""
         self._last_preset_mtime = 0
         self._last_project_items_mtime = 0
+        self._last_favorites_mtime = 0
         if not EFFECTS_FILE.exists():
             with self._lock:
                 self._effects = FALLBACK_EFFECTS
                 self._presets = []
                 self._project_items = []
+                self._favorite_items = []
                 self._generic_items = list(GENERIC_ITEMS)
                 self._all = FALLBACK_EFFECTS + list(GENERIC_ITEMS)
                 self._source = "fallback"
@@ -150,9 +158,10 @@ class EffectsLoader:
             if not effects:
                 raise ValueError("Lista vazia")
 
-            # Carrega presets se disponível
+            # Carrega presets se disponÃ­vel
             presets = []
             project_items = []
+            favorite_items = []
             if PRESETS_FILE.exists():
                 try:
                     pmtime = PRESETS_FILE.stat().st_mtime
@@ -192,23 +201,48 @@ class EffectsLoader:
                 except Exception as e:
                     print(f"[Projeto] Erro ao ler: {e}")
 
+            if FAVORITES_FILE.exists():
+                try:
+                    fmtime = FAVORITES_FILE.stat().st_mtime
+                    with open(FAVORITES_FILE, encoding="utf-8") as ff:
+                        fdata = json.load(ff)
+                    for item in fdata.get("items", []):
+                        favorite_items.append({
+                            "name": item["name"],
+                            "category": item.get("category", "Favoritos"),
+                            "type": "favorite_item",
+                            "favoriteType": item.get("favoriteType", ""),
+                            "sourceProjectPath": item.get("sourceProjectPath", ""),
+                            "sourceTreePath": item.get("sourceTreePath", ""),
+                            "mediaPath": item.get("mediaPath", ""),
+                            "sequenceID": item.get("sequenceID", ""),
+                            "isSequence": item.get("isSequence", False),
+                            "itemType": item.get("itemType", ""),
+                        })
+                    self._last_favorites_mtime = fmtime
+                    print(f"[Favoritos] {len(favorite_items)} itens carregados")
+                except Exception as e:
+                    print(f"[Favoritos] Erro ao ler: {e}")
+
             with self._lock:
                 self._effects = effects
                 self._presets = presets
                 self._project_items = project_items
+                self._favorite_items = favorite_items
                 self._generic_items = list(GENERIC_ITEMS)
-                self._all     = effects + presets + project_items + list(GENERIC_ITEMS)
+                self._all     = effects + presets + project_items + favorite_items + list(GENERIC_ITEMS)
                 self._last_mtime = mtime
                 self._source = "premiere"
 
-            print(f"[Efeitos] {len(effects)} efeitos + {len(presets)} presets + {len(project_items)} itens do projeto")
+            print(f"[Efeitos] {len(effects)} efeitos + {len(presets)} presets + {len(project_items)} itens do projeto + {len(favorite_items)} favoritos")
 
         except Exception as e:
-            print(f"[Efeitos] Erro ao ler arquivo: {e} — usando fallback")
+            print(f"[Efeitos] Erro ao ler arquivo: {e} â€” usando fallback")
             with self._lock:
                 self._effects = FALLBACK_EFFECTS
                 self._presets = []
                 self._project_items = []
+                self._favorite_items = []
                 self._generic_items = list(GENERIC_ITEMS)
                 self._all = FALLBACK_EFFECTS + list(GENERIC_ITEMS)
                 self._source = "fallback"
@@ -221,6 +255,7 @@ class EffectsLoader:
                     self._effects = FALLBACK_EFFECTS
                     self._presets = []
                     self._project_items = []
+                    self._favorite_items = []
                     self._generic_items = list(GENERIC_ITEMS)
                     self._all = FALLBACK_EFFECTS + list(GENERIC_ITEMS)
                     self._source = "fallback"
@@ -231,7 +266,8 @@ class EffectsLoader:
             mtime  = EFFECTS_FILE.stat().st_mtime
             pmtime = PRESETS_FILE.stat().st_mtime if PRESETS_FILE.exists() else 0
             imtime = PROJECT_ITEMS_FILE.stat().st_mtime if PROJECT_ITEMS_FILE.exists() else 0
-            if mtime != self._last_mtime or pmtime != self._last_preset_mtime or imtime != self._last_project_items_mtime:
+            fmtime = FAVORITES_FILE.stat().st_mtime if FAVORITES_FILE.exists() else 0
+            if mtime != self._last_mtime or pmtime != self._last_preset_mtime or imtime != self._last_project_items_mtime or fmtime != self._last_favorites_mtime:
                 self._load()
                 return True
         except Exception:
@@ -248,13 +284,24 @@ class EffectsLoader:
             return [e for e in self._all if e.get("type") == type_filter]
 
     def search(self, query: str, type_filter: str = None) -> list:
-        """Busca com prioridade: começa com > contém, case-insensitive."""
+        """Busca com prioridade: comeÃ§a com > contÃ©m, case-insensitive."""
         q = query.lower().strip()
         base = self.get_by_type(type_filter) if type_filter else self.get_all()
         if not q:
             return base
 
         starts   = [e for e in base if e["name"].lower().startswith(q)]
+        contains = [e for e in base if q in e["name"].lower() and e not in starts]
+        return starts + contains
+
+    def search_types(self, query: str, type_filters: set) -> list:
+        q = query.lower().strip()
+        with self._lock:
+            base = [e for e in self._all if e.get("type") in type_filters]
+        if not q:
+            return base
+
+        starts = [e for e in base if e["name"].lower().startswith(q)]
         contains = [e for e in base if q in e["name"].lower() and e not in starts]
         return starts + contains
 
@@ -283,6 +330,11 @@ class EffectsLoader:
             return len(self._generic_items)
 
     @property
+    def favorite_item_count(self) -> int:
+        with self._lock:
+            return len(self._favorite_items)
+
+    @property
     def categories(self) -> list:
         with self._lock:
             seen = []
@@ -293,16 +345,16 @@ class EffectsLoader:
             return seen
 
 
-# ─── Bridge: envia comando para o Premiere ────────────────────────────────────
+# â”€â”€â”€ Bridge: envia comando para o Premiere â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-# ─── Bridge: envia comando para o Premiere ────────────────────────────────────
+# â”€â”€â”€ Bridge: envia comando para o Premiere â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def write_safe(file_path: Path, content: str):
-    """Grava em arquivo temporário e renomeia — elimina race conditions."""
+    """Grava em arquivo temporÃ¡rio e renomeia â€” elimina race conditions."""
     tmp = file_path.with_suffix(file_path.suffix + ".tmp")
     try:
         tmp.write_text(content, encoding="utf-8")
-        tmp.replace(file_path)  # atômico no Windows e Linux
+        tmp.replace(file_path)  # atÃ´mico no Windows e Linux
     except Exception:
         try:
             tmp.unlink(missing_ok=True)
@@ -336,6 +388,19 @@ def send_command(effect: dict):
             "genericKey": effect.get("genericKey", ""),
             "timestamp":  time.time(),
             "status":     "pending",
+        }
+    elif effect.get("type") == "favorite_item":
+        payload = {
+            "command":           "insertFavoriteItem",
+            "itemName":          effect["name"],
+            "mediaPath":         effect.get("mediaPath", ""),
+            "sequenceID":        effect.get("sequenceID", ""),
+            "itemType":          effect.get("itemType", ""),
+            "isSequence":        effect.get("isSequence", False),
+            "favoriteType":      effect.get("favoriteType", ""),
+            "sourceProjectPath": effect.get("sourceProjectPath", ""),
+            "timestamp":         time.time(),
+            "status":            "pending",
         }
     else:
         payload = {
@@ -410,7 +475,7 @@ def send_debug_command(command: str):
     print(f"[Bridge] Comando enviado: {command}")
 
 
-# ─── UI ───────────────────────────────────────────────────────────────────────
+# â”€â”€â”€ UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class EffectPalette:
     def __init__(self):
@@ -424,7 +489,7 @@ class EffectPalette:
         self._start_file_watcher()
         self.root.after(0, self._prime_first_show)
 
-    # ── Construção da janela ──────────────────────────────────────────────────
+    # â”€â”€ ConstruÃ§Ã£o da janela â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _build(self):
         self.root = tk.Tk()
@@ -439,10 +504,10 @@ class EffectPalette:
         inner = tk.Frame(outer, bg=BG)
         inner.pack(fill="both", expand=True)
 
-        # ── Cabeçalho ──
+        # â”€â”€ CabeÃ§alho â”€â”€
         header = tk.Frame(inner, bg=BG, padx=18, pady=10)
         header.pack(fill="x")
-        tk.Label(header, text="✦  Efeito / Preset",
+        tk.Label(header, text="*  Efeito / Preset",
                  bg=BG, fg=TEXT_MUTED, font=("Segoe UI", 9), anchor="w"
                  ).pack(side="left")
         self.conn_label = tk.Label(header, text="", bg=BG, font=("Segoe UI", 8))
@@ -451,10 +516,10 @@ class EffectPalette:
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x")
 
-        # ── Campo de busca ──
+        # â”€â”€ Campo de busca â”€â”€
         sf = tk.Frame(inner, bg=BG2, padx=16)
         sf.pack(fill="x")
-        tk.Label(sf, text="⌕", bg=BG2, fg=ACCENT,
+        tk.Label(sf, text=">", bg=BG2, fg=ACCENT,
                  font=("Segoe UI", 16)).pack(side="left", pady=14)
 
         self.search_var = tk.StringVar()
@@ -467,9 +532,9 @@ class EffectPalette:
         )
         self.entry.pack(side="left", fill="x", expand=True, pady=14, padx=(8, 0))
 
-        # Botão de refresh
+        # BotÃ£o de refresh
         self.refresh_btn = tk.Label(
-            sf, text="↺", bg=BG2, fg=TEXT_MUTED,
+            sf, text="R", bg=BG2, fg=TEXT_MUTED,
             font=("Segoe UI", 14), cursor="hand2",
         )
         self.refresh_btn.pack(side="right", padx=(0, 4))
@@ -479,14 +544,14 @@ class EffectPalette:
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x")
 
-        # ── Filtro por categoria ──
+        # â”€â”€ Filtro por categoria â”€â”€
         self.cat_frame = tk.Frame(inner, bg=BG, padx=12, pady=6)
         self.cat_frame.pack(fill="x")
         self._build_category_pills()
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x")
 
-        # ── Lista de resultados ──
+        # â”€â”€ Lista de resultados â”€â”€
         lc = tk.Frame(inner, bg=BG)
         lc.pack(fill="both", expand=True)
         self.listbox = tk.Listbox(
@@ -503,17 +568,17 @@ class EffectPalette:
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x")
 
-        # ── Rodapé ──
+        # â”€â”€ RodapÃ© â”€â”€
         footer = tk.Frame(inner, bg=BG, padx=18, pady=8)
         footer.pack(fill="x")
-        tk.Label(footer, text="↑↓ navegar   ↵ aplicar   ESC fechar",
+        tk.Label(footer, text="Up/Down navegar   Enter aplicar   ESC fechar",
                  bg=BG, fg=TEXT_MUTED, font=("Segoe UI", 8), anchor="w"
                  ).pack(side="left")
         self.status_label = tk.Label(footer, text="", bg=BG,
                                      fg=ACCENT, font=("Segoe UI", 8, "bold"))
         self.status_label.pack(side="right")
 
-        # ── Bindings ──
+        # â”€â”€ Bindings â”€â”€
         self.entry.bind("<Escape>",  lambda e: self.hide())
         self.entry.bind("<Control-w>", lambda e: self.hide())
         self.entry.bind("<Return>",  lambda e: self._apply_selected())
@@ -528,12 +593,12 @@ class EffectPalette:
         self._center_window(W, H)
         self._refresh_list()
 
-    # ── Pills de categoria ────────────────────────────────────────────────────
+    # â”€â”€ Pills de categoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _build_category_pills(self):
         for w in self.cat_frame.winfo_children():
             w.destroy()
-        for cat in ["Todos", "Vídeo", "Áudio", "Presets", "Projeto", "Genéricos"]:
+        for cat in ["Todos", "Video", "Audio", "Presets", "Projeto", "Favoritos"]:
             active = (cat == "Todos" and self._active_category is None) or \
                      (cat == self._active_category)
             pill = tk.Label(
@@ -550,7 +615,7 @@ class EffectPalette:
                 self._refresh_list()
             pill.bind("<Button-1>", on_click)
 
-    # ── Watcher de arquivo ────────────────────────────────────────────────────
+    # â”€â”€ Watcher de arquivo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _start_file_watcher(self):
         def watch():
@@ -560,11 +625,11 @@ class EffectPalette:
         self._watch_job = self.root.after(int(WATCH_INTERVAL * 1000), watch)
 
     def _on_effects_updated(self):
-        print(f"[Watcher] Lista atualizada — {self.loader.count} efeitos")
+        print(f"[Watcher] Lista atualizada â€” {self.loader.count} efeitos")
         self._build_category_pills()
         self._refresh_list()
         self._update_conn_label()
-        self.status_label.config(text=f"↺ Lista atualizada ({self.loader.count} efeitos)")
+        self.status_label.config(text=f"[Atualizado] {self.loader.count} efeitos")
 
     def _manual_refresh(self):
         send_debug_command("exportEffects")
@@ -572,24 +637,24 @@ class EffectPalette:
         self._build_category_pills()
         self._refresh_list()
         self._update_conn_label()
-        self.status_label.config(text="↺ Solicitando atualização ao Premiere...")
+        self.status_label.config(text="Solicitando atualizacao ao Premiere...")
 
-    # ── Lista e busca ─────────────────────────────────────────────────────────
+    # â”€â”€ Lista e busca â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _get_filtered_effects(self) -> list:
         query = self.search_var.get().strip()
         cat   = self._active_category
 
-        if cat == "Vídeo":
+        if cat == "Video":
             return self.loader.search(query, type_filter="video")
-        elif cat == "Áudio":
+        elif cat == "Audio":
             return self.loader.search(query, type_filter="audio")
         elif cat == "Presets":
             return self.loader.search(query, type_filter="preset")
         elif cat == "Projeto":
             return self.loader.search(query, type_filter="project_item")
-        elif cat == "Genéricos":
-            return self.loader.search(query, type_filter="generic_item")
+        elif cat == "Favoritos":
+            return self.loader.search_types(query, {"generic_item", "favorite_item"})
         else:
             return self.loader.search(query)
 
@@ -600,7 +665,8 @@ class EffectPalette:
             is_preset = e.get("type") == "preset"
             is_project_item = e.get("type") == "project_item"
             is_generic_item = e.get("type") == "generic_item"
-            icon  = "◈ " if is_preset else ("▣ " if is_project_item else ("◆ " if is_generic_item else "  "))
+            is_favorite_item = e.get("type") == "favorite_item"
+            icon  = "[P] " if is_preset else ("[I] " if is_project_item else ("[F] " if (is_generic_item or is_favorite_item) else "  "))
             cat   = e.get("category", "")
             label = f"{icon}{e['name']}" + (f"  [{cat}]" if cat and not is_preset else "")
             self.listbox.insert("end", label)
@@ -612,7 +678,7 @@ class EffectPalette:
     def _on_search_change(self, *_):
         self._refresh_list()
 
-    # ── Seleção e aplicação ───────────────────────────────────────────────────
+    # â”€â”€ SeleÃ§Ã£o e aplicaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _move_selection(self, direction):
         cur = self.listbox.curselection()
@@ -649,14 +715,14 @@ class EffectPalette:
                     return
 
         send_command(effect)
-        if effect.get("type") in {"project_item", "generic_item"}:
-            self.status_label.config(text=f"↳  {effect['name']}")
+        if effect.get("type") in {"project_item", "generic_item", "favorite_item"}:
+            self.status_label.config(text=f"[Inserido] {effect['name']}")
         else:
-            self.status_label.config(text=f"✓  {effect['name']}")
+            self.status_label.config(text=f"[Aplicado] {effect['name']}")
         self.root.update()
         self.root.after(900, self.hide)
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _center_window(self, w, h):
         sw = self.root.winfo_screenwidth()
@@ -666,14 +732,14 @@ class EffectPalette:
     def _update_conn_label(self):
         if self.loader.source == "premiere":
             self.conn_label.config(
-                text=f"● Premiere  {self.loader.count} efeitos  {self.loader.preset_count} presets",
+                text=f"* Premiere  {self.loader.count} efeitos  {self.loader.preset_count} presets",
                 fg=GREEN)
             if self.loader.project_item_count:
                 self.conn_label.config(
-                    text=f"● Premiere  {self.loader.count} efeitos  {self.loader.preset_count} presets  {self.loader.project_item_count} itens",
+                    text=f"* Premiere  {self.loader.count} efeitos  {self.loader.preset_count} presets  {self.loader.project_item_count} itens",
                     fg=GREEN)
         else:
-            self.conn_label.config(text="● Offline (fallback)", fg=ORANGE)
+            self.conn_label.config(text="* Offline (fallback)", fg=ORANGE)
 
     def _on_focus_out(self, event):
         if self.root.winfo_exists():
@@ -757,7 +823,7 @@ class EffectPalette:
         self.status_label.config(text="")
         self._update_conn_label()
 
-        # Desativa FocusOut temporariamente para não fechar durante a abertura
+        # Desativa FocusOut temporariamente para nÃ£o fechar durante a abertura
         self.root.unbind("<FocusOut>")
 
         try:
@@ -769,7 +835,7 @@ class EffectPalette:
         self._force_focus_attempt(0)
         self.root.after(120, self._restore_borderless)
 
-        # Reativa FocusOut após a janela estar estável
+        # Reativa FocusOut apÃ³s a janela estar estÃ¡vel
         self.root.after(500, lambda: self.root.bind("<FocusOut>", self._on_focus_out))
 
     def hide(self):
@@ -785,7 +851,7 @@ class EffectPalette:
         self.root.mainloop()
 
 
-# ─── Janela de Debug ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Janela de Debug â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 LOG_FILE = EXT_DATA / "worker.log"
 
@@ -805,7 +871,7 @@ class DebugWindow:
 
     def _build(self):
         self.win = tk.Toplevel(self.root)
-        self.win.title("Effect Palette — Debug")
+        self.win.title("Effect Palette - Debug")
         self.win.attributes("-topmost", True)
         self.win.configure(bg=BG)
         self.win.protocol("WM_DELETE_WINDOW", self.hide)
@@ -844,7 +910,7 @@ class DebugWindow:
 
         tk.Frame(self.win, bg=BORDER, height=1).pack(fill="x")
 
-        # ── Botões de ação ──
+        # â”€â”€ BotÃµes de aÃ§Ã£o â”€â”€
         actions = tk.Frame(self.win, bg=BG, padx=14, pady=8)
         actions.pack(fill="x")
 
@@ -856,9 +922,9 @@ class DebugWindow:
             b.bind("<Enter>",    lambda e, b=b: b.config(fg=ACCENT, bg=BORDER))
             b.bind("<Leave>",    lambda e, b=b: b.config(fg=TEXT_MUTED, bg=BG2))
 
-        make_btn(actions, "↺ Exportar efeitos", "exportEffects")
-        make_btn(actions, "Diagnóstico",         "diagnose")
-        make_btn(actions, "✕ Limpar logs/bridge", "clearBridge")
+        make_btn(actions, "Atualizar efeitos", "exportEffects")
+        make_btn(actions, "Diagnostico",         "diagnose")
+        make_btn(actions, "Limpar logs/bridge", "clearBridge")
 
         tk.Frame(self.win, bg=BORDER, height=1).pack(fill="x")
 
@@ -898,8 +964,8 @@ class DebugWindow:
                 self.text.configure(state="normal")
                 self.text.delete("1.0", "end")
                 self.text.insert("end",
-                    "worker.log não encontrado.\n"
-                    "O Premiere está aberto com a extensão carregada?")
+                    "worker.log nao encontrado.\n"
+                    "O Premiere esta aberto com a extensao carregada?")
                 self.text.configure(state="disabled")
                 self.status_lbl.config(text="sem arquivo", fg=ORANGE)
         except Exception as e:
@@ -909,7 +975,7 @@ class DebugWindow:
 
     def _send(self, command: str):
         send_debug_command(command)
-        self.status_lbl.config(text=f"→ {command}", fg=ACCENT)
+        self.status_lbl.config(text=f"-> {command}", fg=ACCENT)
 
     def _clear_log(self):
         try:
@@ -942,58 +1008,78 @@ class DebugWindow:
         self.hide() if self.is_open else self.show()
 
 
-# ─── Listener de atalho global ────────────────────────────────────────────────
+# â”€â”€â”€ Listener de atalho global â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class HotkeyListener:
     def __init__(self, palette: EffectPalette, debug: DebugWindow):
         self.palette = palette
         self.debug   = debug
         self.pressed = set()
+        self._toggle_combo_active = False
+        self._debug_combo_active = False
+        self._quit_combo_active = False
 
-    def _on_press(self, key):
-        self.pressed.add(key)
-        ctrl  = keyboard.Key.ctrl_l in self.pressed or keyboard.Key.ctrl_r in self.pressed
+    def _combo_state(self):
+        ctrl = keyboard.Key.ctrl_l in self.pressed or keyboard.Key.ctrl_r in self.pressed
         space = keyboard.Key.space in self.pressed
-        q     = keyboard.KeyCode.from_char('\x11') in self.pressed  # Ctrl+Q
+        q = keyboard.KeyCode.from_char('\x11') in self.pressed  # Ctrl+Q
         try:
             d = keyboard.KeyCode.from_char('d') in self.pressed or \
                 keyboard.KeyCode.from_char('D') in self.pressed or \
                 keyboard.KeyCode.from_char('\x04') in self.pressed
         except Exception:
             d = False
+        return ctrl, space, d, q
 
-        if ctrl and space:
+    def _refresh_combo_guards(self):
+        ctrl, space, d, q = self._combo_state()
+        if not (ctrl and space):
+            self._toggle_combo_active = False
+        if not (ctrl and d):
+            self._debug_combo_active = False
+        if not (ctrl and q):
+            self._quit_combo_active = False
+
+    def _on_press(self, key):
+        self.pressed.add(key)
+        ctrl, space, d, q = self._combo_state()
+
+        if ctrl and space and not self._toggle_combo_active:
+            self._toggle_combo_active = True
             if premiere_is_focused():
                 self.palette.root.after(0, self.palette.toggle)
 
-        if ctrl and d:
+        if ctrl and d and not self._debug_combo_active:
+            self._debug_combo_active = True
             self.palette.root.after(0, self.debug.toggle)
 
-        if ctrl and q:
+        if ctrl and q and not self._quit_combo_active:
+            self._quit_combo_active = True
             print("[App] Encerrando via Ctrl+Q...")
             self.palette.root.after(0, self.palette.root.destroy)
 
     def _on_release(self, key):
         self.pressed.discard(key)
+        self._refresh_combo_guards()
 
     def start(self):
         self._listener = keyboard.Listener(
             on_press=self._on_press, on_release=self._on_release)
         self._listener.daemon = True
         self._listener.start()
-        print("[Hotkey] Ctrl+Espaço ativo")
+        print("[Hotkey] Ctrl+Espaco ativo")
 
     def stop(self):
         if hasattr(self, "_listener"):
             self._listener.stop()
 
 
-# ─── Ponto de entrada ─────────────────────────────────────────────────────────
+# â”€â”€â”€ Ponto de entrada â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main():
     print("=" * 52)
     print("  Premiere Pro Effect Palette")
-    print(f"  Atalho     : Ctrl+Espaço")
+    print(f"  Atalho     : Ctrl+Espaco")
     print(f"  Debug      : Ctrl+D")
     print(f"  Encerrar   : Ctrl+Q")
     print(f"  Efeitos    : {EFFECTS_FILE}")
@@ -1015,3 +1101,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
