@@ -7,6 +7,7 @@ incluindo plugins de terceiros (Boris FX, Maxon, etc.) e presets customizados.
 """
 
 import tkinter as tk
+import tkinter.font as tkfont
 import threading
 import json
 import os
@@ -482,6 +483,10 @@ class EffectPalette:
         self.loader = EffectsLoader()
         self.root   = None
         self.is_open = False
+        self._window_width = 580
+        self._window_height = 430
+        self._min_window_width = 580
+        self._max_window_width = 1180
         self._focus_primed = False
         self._active_category = None
         self._watch_job = None
@@ -588,7 +593,7 @@ class EffectPalette:
         self.listbox.bind("<Double-Button-1>", lambda e: self._apply_selected())
         self.root.bind("<FocusOut>", self._on_focus_out)
 
-        W, H = 580, 430
+        W, H = self._window_width, self._window_height
         self.root.geometry(f"{W}x{H}")
         self._center_window(W, H)
         self._refresh_list()
@@ -661,6 +666,7 @@ class EffectPalette:
     def _refresh_list(self):
         results = self._get_filtered_effects()
         self.listbox.delete(0, "end")
+        labels = []
         for e in results:
             is_preset = e.get("type") == "preset"
             is_project_item = e.get("type") == "project_item"
@@ -668,8 +674,13 @@ class EffectPalette:
             is_favorite_item = e.get("type") == "favorite_item"
             icon  = "[P] " if is_preset else ("[I] " if is_project_item else ("[F] " if (is_generic_item or is_favorite_item) else "  "))
             cat   = e.get("category", "")
-            label = f"{icon}{e['name']}" + (f"  [{cat}]" if cat and not is_preset else "")
+            if is_preset and cat:
+                label = f"{icon}{cat} > {e['name']}"
+            else:
+                label = f"{icon}{e['name']}" + (f"  [{cat}]" if cat and not is_preset else "")
+            labels.append(label)
             self.listbox.insert("end", label)
+        self._auto_size_to_labels(labels)
         if results:
             self.listbox.selection_set(0)
         q = self.search_var.get().strip()
@@ -728,6 +739,27 @@ class EffectPalette:
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         self.root.geometry(f"{w}x{h}+{(sw-w)//2}+{int(sh*0.28)}")
+
+    def _auto_size_to_labels(self, labels: list[str]):
+        try:
+            font = tkfont.Font(font=self.listbox.cget("font"))
+            widest_px = 0
+            for label in labels[:250]:
+                widest_px = max(widest_px, font.measure(label))
+
+            # paddings, scrollbar, frame borders and a small comfort margin
+            target_width = widest_px + 90
+            if target_width < self._min_window_width:
+                target_width = self._min_window_width
+
+            screen_cap = max(self._min_window_width, int(self.root.winfo_screenwidth() * 0.84))
+            target_width = min(target_width, self._max_window_width, screen_cap)
+
+            if target_width != self._window_width:
+                self._window_width = target_width
+                self._center_window(self._window_width, self._window_height)
+        except Exception:
+            pass
 
     def _update_conn_label(self):
         if self.loader.source == "premiere":
