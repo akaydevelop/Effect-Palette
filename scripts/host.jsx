@@ -2609,10 +2609,21 @@ function _keyframeTimeFromTicks(ticks, originTicks, baseTicks) {
 }
 
 function _applyTemporalInterpolation(prop, time, parts) {
-  if (!prop || !parts || parts.length < 10) return;
+  if (!prop || !parts || parts.length < 3) return;
 
-  var interpOut = parseInt(parts[8], 10);
-  var interpIn = parseInt(parts[9], 10);
+  var interpOut = 5;
+  var interpIn = 5;
+
+  if (parts.length >= 10) {
+    interpOut = parseInt(parts[8], 10);
+    interpIn = parseInt(parts[9], 10);
+  } else if (parts.length >= 8) {
+    interpOut = parseInt(parts[2], 10);
+    interpIn = parseInt(parts[2], 10);
+  }
+
+  if (isNaN(interpOut)) interpOut = 5;
+  if (isNaN(interpIn)) interpIn = interpOut;
   var interp = 5;
 
   if (interpOut === 4 && interpIn === 4) interp = 4;
@@ -2681,6 +2692,73 @@ function _bezierEaseProgress(t, outInfluence, inInfluence) {
   var accel = Math.pow(t, Math.max(0.15, 1 - (outInf * 0.8)));
   var decel = 1 - Math.pow(1 - accel, Math.max(0.15, 1 - (inInf * 0.8)));
   return _clamp01(decel);
+}
+
+function _normalizeBezierInfluence(rawValue, fallbackValue) {
+  var fallback = isNaN(fallbackValue) ? 0.1666666667 : fallbackValue;
+  var value = parseFloat(rawValue);
+  if (isNaN(value)) return fallback;
+  if (value > 1) value = value / 100;
+  return _clamp01(value);
+}
+
+function _deriveScalarBezierControls(startInfo, endInfo, startVal, endVal) {
+  var defaultOutInfluence = 0.1666666667;
+  var defaultInInfluence = 0.1666666667;
+
+  var outInfluence = _normalizeBezierInfluence(
+    startInfo && startInfo.parts && startInfo.parts.length > 5 ? startInfo.parts[5] : null,
+    defaultOutInfluence
+  );
+  var inInfluence = _normalizeBezierInfluence(
+    endInfo && endInfo.parts && endInfo.parts.length > 7 ? endInfo.parts[7] : null,
+    defaultInInfluence
+  );
+
+  var x1 = _clamp01(outInfluence);
+  var x2 = _clamp01(1 - inInfluence);
+
+  var durationSeconds = Math.max(1 / 60, (endInfo.ticks - startInfo.ticks) / 254016000000);
+  var deltaValue = endVal.value - startVal.value;
+  var averageSpeed = deltaValue / durationSeconds;
+
+  var startOutSpeed = startInfo && startInfo.parts && startInfo.parts.length > 6 ? parseFloat(startInfo.parts[6]) : NaN;
+  var endInSpeed = endInfo && endInfo.parts && endInfo.parts.length > 4 ? parseFloat(endInfo.parts[4]) : NaN;
+
+  var speedRatioOut = 1;
+  var speedRatioIn = 1;
+  if (!isNaN(averageSpeed) && Math.abs(averageSpeed) > 0.000001) {
+    if (!isNaN(startOutSpeed)) speedRatioOut = startOutSpeed / averageSpeed;
+    if (!isNaN(endInSpeed)) speedRatioIn = endInSpeed / averageSpeed;
+  }
+
+  if (!isFinite(speedRatioOut)) speedRatioOut = 1;
+  if (!isFinite(speedRatioIn)) speedRatioIn = 1;
+
+  if (speedRatioOut < 0) speedRatioOut = 0;
+  if (speedRatioIn < 0) speedRatioIn = 0;
+
+  var y1 = x1 * speedRatioOut;
+  var y2 = 1 - ((1 - x2) * speedRatioIn);
+
+  if (!isFinite(y1)) y1 = x1;
+  if (!isFinite(y2)) y2 = x2;
+
+  y1 = Math.max(-2, Math.min(3, y1));
+  y2 = Math.max(-2, Math.min(3, y2));
+
+  if (x2 < x1 + 0.02) {
+    var mid = (x1 + x2) / 2;
+    x1 = _clamp01(mid - 0.01);
+    x2 = _clamp01(mid + 0.01);
+  }
+
+  return {
+    x1: x1,
+    y1: y1,
+    x2: x2,
+    y2: y2
+  };
 }
 
 function _parsePointTangents(parts) {
@@ -2825,14 +2903,56 @@ function _deriveBezierControls(startInfo, endInfo) {
 }
 
 function _shouldEmulateBezier(partsA, partsB) {
-  if (!partsA || !partsB || partsA.length < 10 || partsB.length < 10) return false;
+  if (!partsA || !partsB) return false;
 
-  var interpOut = parseInt(partsA[8], 10);
-  var interpIn = parseInt(partsB[9], 10);
+  var interpOut = NaN;
+  var interpIn = NaN;
+
+  if (partsA.length >= 10 && partsB.length >= 10) {
+    interpOut = parseInt(partsA[8], 10);
+    interpIn = parseInt(partsB[9], 10);
+  } else if (partsA.length >= 8 && partsB.length >= 8) {
+    interpOut = parseInt(partsA[2], 10);
+    interpIn = parseInt(partsB[2], 10);
+  } else {
+    return false;
+  }
+
+  if (isNaN(interpOut) && isNaN(interpIn)) return false;
   if (interpOut === 4 && interpIn === 4) return false;
 
   return interpOut === 5 || interpIn === 5 || interpOut === 6 || interpIn === 6 ||
          interpOut === 7 || interpIn === 7 || interpOut === 8 || interpIn === 8;
+}
+
+function _seriesLooksDenseForBezierEmulation(keyInfos, controlType) {
+  if (!keyInfos || keyInfos.length < 2) return false;
+
+  var ctype = String(controlType || "");
+  var frameTicks = 4233600000;
+  var totalSegments = keyInfos.length - 1;
+  var shortSegments = 0;
+  var totalTicks = 0;
+
+  for (var i = 0; i < totalSegments; i++) {
+    var segmentTicks = Math.max(0, keyInfos[i + 1].ticks - keyInfos[i].ticks);
+    totalTicks += segmentTicks;
+    if (segmentTicks <= (frameTicks * 2.5)) shortSegments++;
+  }
+
+  var averageTicks = totalSegments > 0 ? (totalTicks / totalSegments) : 0;
+
+  if (ctype === "6") {
+    if (keyInfos.length >= 4) return true;
+    if (shortSegments >= totalSegments && totalSegments >= 2) return true;
+    return false;
+  }
+
+  if (keyInfos.length >= 7) return true;
+  if (keyInfos.length >= 5 && averageTicks <= (frameTicks * 3)) return true;
+  if (shortSegments >= Math.max(3, totalSegments - 1)) return true;
+
+  return false;
 }
 
 function _emulateBezierSegment(prop, startInfo, endInfo, controlType) {
@@ -2863,14 +2983,20 @@ function _emulateBezierSegment(prop, startInfo, endInfo, controlType) {
     return;
   }
 
-  var samples = String(controlType || "") === "6" ? 26 : 18;
-  var outInfluence = startInfo.parts.length > 5 ? parseFloat(startInfo.parts[5]) : 0.1666666667;
-  var inInfluence = endInfo.parts.length > 7 ? parseFloat(endInfo.parts[7]) : 0.1666666667;
+  var scalarControls = _deriveScalarBezierControls(startInfo, endInfo, startVal, endVal);
+  var samples = _estimatedFrameCountForSegment(startInfo.ticks, endInfo.ticks);
+  if (samples < 3) samples = 3;
+  if (samples > 12) samples = 12;
 
   for (var s = 1; s < samples; s++) {
-    var linearT = _distributedSamplePosition(s, samples, 0.8);
-    linearT = 1 - Math.cos((linearT * Math.PI) / 2);
-    var easedT = _bezierEaseProgress(linearT, outInfluence, inInfluence);
+    var linearT = s / samples;
+    var easedT = _progressBezierAt(
+      linearT,
+      scalarControls.x1,
+      scalarControls.y1,
+      scalarControls.x2,
+      scalarControls.y2
+    );
     var ticks = startInfo.ticks + ((endInfo.ticks - startInfo.ticks) * linearT);
     var helperTime = _keyframeTimeFromTicks(ticks, startInfo.originTicks, startInfo.baseTicks);
     var helperValue = _interpolateInterpolableValue(startVal, endVal, easedT);
@@ -3000,10 +3126,9 @@ function _applyKeyframes(prop, keyframesStr, param, timingInfo) {
       _applyTemporalInterpolation(prop, kfTime, parts);
     }
 
-    for (var k = 0; k < keyInfos.length - 1; k++) {
-      if (_shouldEmulateBezier(keyInfos[k].parts, keyInfos[k + 1].parts)) {
-        _emulateBezierSegment(prop, keyInfos[k], keyInfos[k + 1], param ? param.controlType : null);
-      }
-    }
+    // Default behavior: preserve the main keyframes and apply Premiere's
+    // native interpolation type only. Helper-key easing reconstruction stays
+    // disabled in the stable path because it is not consistently faithful
+    // across real-world presets.
   } catch(e) { /* ignora erros de keyframe */ }
 }
