@@ -83,7 +83,9 @@ O app Python escreve comandos em `premiere_cmd.json`, o worker le, executa no Pr
 - Aplicacao de efeitos de video
 - Aplicacao de efeitos de audio
 - Aplicacao de presets do usuario
+- Aplicacao de transicoes de video e audio
 - Insercao de itens do projeto direto na timeline
+- Reconstrucao do conteudo interno de sequencias do projeto em muitos casos reais
 - Insercao inteligente na proxima track livre
 - Criacao de nova track quando necessario
 - Suporte a video e audio nesse fluxo de insercao
@@ -94,6 +96,14 @@ O app Python escreve comandos em `premiere_cmd.json`, o worker le, executa no Pr
 - Organizacao de assets em `EffectPalette_Assets`
 - Limpeza de logs no startup e por comando
 - Refresh manual e refresh automatico de itens do projeto
+
+### Concluido recentemente
+
+- Aba `Transicoes`
+- Aplicacao de transicoes no inicio do clip
+- Aplicacao de transicoes no fim do clip
+- Aplicacao automatica entre dois clips quando o Premiere consegue resolver o corte
+- Dialog de escolha com mouse e teclado
 
 ### Built-ins atuais da aba Favoritos
 
@@ -166,6 +176,8 @@ O fluxo de insercao de itens do projeto esta funcionando.
 - se nao houver track disponivel, cria nova track
 - funciona para video e audio
 - se o item for uma `Adjustment Layer` e houver multiplos clips selecionados, a layer cobre a selecao inteira
+- se o item do projeto for uma sequencia, a extensao tenta reconstruir o conteudo interno dela na timeline ativa, em vez de depender apenas do comportamento de nest do Premiere
+- nesse fluxo, efeitos extras e keyframes basicos desses clips internos tambem podem ser clonados para o destino
 
 ### Observacao
 
@@ -190,7 +202,7 @@ Hoje o sistema ja resolve:
 ### Limitacoes atuais
 
 1. **Keyframes em imagens e Adjustment Layers**
-   Ainda sao um problema real do ecossistema do Premiere/API. A extensao hoje mitiga isso com aviso antes de aplicar presets animados nesses alvos.
+   O fluxo melhorou bastante. A extensao agora usa um helper clip temporario para presets animados em clips "infinitos" e depois clona componentes e keyframes para o alvo real. Ainda assim, pode haver pequeno offset residual de `1-2` frames em alguns casos.
 
 2. **Curvas Bezier / Speed nao 100% fieis**
    A extensao aplica os keyframes principais em clips normais, mas nao tenta mais reconstruir agressivamente a curva original do preset com helper keys no fluxo padrao. O comportamento atual prioriza estabilidade: usa a interpolacao nativa do Premiere e um bezier padrao/aproximado quando necessario.
@@ -198,16 +210,21 @@ Hoje o sistema ja resolve:
 3. **Validacao gradual de edge cases**
    Ainda faz sentido continuar validando presets diferentes ao longo do uso real e de testes com usuarios.
 
-### Mitigacao atual para clips "infinitos"
+### Fallback atual para clips "infinitos"
 
 Se o preset tiver keyframes e a selecao atual incluir:
 
 - `Adjustment Layer`
 - imagem / still
 
-a UI mostra um aviso antes da aplicacao.
+a extensao agora tenta este fluxo:
 
-Isso evita prometer um comportamento que o Premiere ainda nao entrega de forma confiavel nesses tipos de clip.
+1. criar um helper clip finito temporario
+2. aplicar o preset nesse helper
+3. clonar os componentes e keyframes resultantes para o alvo real
+4. limpar o helper
+
+Na pratica, esse fallback passou a funcionar muito melhor em casos reais e deixou de ser apenas uma mitigacao teorica.
 
 ### Direcao futura para easing
 
@@ -216,7 +233,7 @@ Uma reconstrucao aproximada de easing por helper keys continua sendo uma ideia v
 Se esse caminho voltar no futuro, a direcao mais provavel e trata-lo como:
 
 - recurso experimental
-- focado primeiro em parametros e presets onde a aproximacao realmente compense
+- focado primeiro em presets onde a aproximacao realmente compense
 - possivelmente reavaliado quando houver um backend UXP mais maduro
 
 ---
@@ -300,9 +317,9 @@ Ou seja, se houver evolucao para UXP no futuro, ela deve acontecer como backend 
 
 ### Prioridade mais alta
 
-1. **Adicionar transicoes**
-2. **Mudar parametros de clipes**
-3. **Continuar ampliando os recursos da extensao antes de UI/beta**
+1. **Preparar closed beta**
+2. **Melhorar README e documentacao publica**
+3. **Continuar refinando estabilidade com testes reais**
 
 ### Prioridade media
 
@@ -319,8 +336,6 @@ Ou seja, se houver evolucao para UXP no futuro, ela deve acontecer como backend 
 ### Futuro estrategico
 
 10. **Arquitetura Full/Lite para o backend do Premiere**
-11. **Closed beta**
-12. **Melhorar README e documentacao publica**
 
 ---
 

@@ -7,6 +7,7 @@ Paleta flutuante para Adobe Premiere Pro, controlada por um app Python, com back
 - aplica efeitos de video
 - aplica efeitos de audio
 - aplica presets do usuario
+- aplica transicoes de video e audio
 - insere itens do projeto na timeline
 - insere built-ins do Premiere, como `Adjustment Layer`, `Bars and Tone`, `Black Video`, `Color Matte` e `Transparent Video`
 - insere favoritos customizados vindos do `template_project`
@@ -30,15 +31,18 @@ Paleta flutuante para Adobe Premiere Pro, controlada por um app Python, com back
 
 - aplicacao de efeitos: funcionando
 - aplicacao de presets: funcionando na maior parte dos casos
+- aplicacao de transicoes: funcionando
 - insercao de itens do projeto: funcionando
 - favoritos e built-ins: funcionando
 - `Adjustment Layer` por template: funcionando
+- sequencias do projeto: funcionando com reconstrucao do conteudo interno em muitos casos reais
+- presets animados em `Adjustment Layer` e imagens: funcionando via helper clip temporario + clonagem de componentes/keyframes
 
 ## Limitacoes conhecidas
 
-- Em imagens e `Adjustment Layers`, presets com keyframes continuam sujeitos a limitacoes da API do Premiere.
 - Em clips normais, os keyframes principais do preset sao aplicados, mas o easing original do preset nao e preservado com fidelidade total.
 - No fluxo atual, keyframes temporais usam a interpolacao nativa do Premiere e um bezier padrao/aproximado quando necessario, em vez de tentar reconstruir exatamente a curva original do preset.
+- Em presets animados aplicados em clips "infinitos" como `Adjustment Layer` e imagens, o fallback atual funciona bem, mas ainda pode haver pequeno deslocamento residual de `1-2` frames em alguns casos.
 
 ## Templates
 

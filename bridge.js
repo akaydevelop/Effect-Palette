@@ -607,6 +607,8 @@ function startPolling() {
 
           if (cmd.command === "applyEffect") {
             applyEffect(cmd);
+          } else if (cmd.command === "applyTransition") {
+            applyTransition(cmd);
           } else if (cmd.command === "applyPreset") {
             applyPreset(cmd);
           } else if (cmd.command === "insertProjectItem") {
@@ -722,6 +724,46 @@ function applyPreset(cmd) {
   });
 }
 
+// ─── 5b. Aplicar transição ───────────────────────────────────────────────────
+
+function applyTransition(cmd) {
+  const transitionName = cmd.transitionName;
+  const transitionType = cmd.transitionType || "video";
+  const transitionPlacement = cmd.transitionPlacement || "auto";
+
+  log("→ Aplicando transição: " + transitionName, "apply");
+  setStatus("Aplicando transição: " + transitionName, "waiting");
+  markCmdStatus("processing");
+
+  const script = 'applyTransitionWithSelection(' +
+    JSON.stringify(transitionName) + ', ' +
+    JSON.stringify(transitionType) + ', ' +
+    JSON.stringify(transitionPlacement) + ', ' +
+    JSON.stringify(lastSelectionJSON) + ')';
+
+  evalHostScript(script, function(result) {
+    if (result === "ok") {
+      appliedCount++;
+      updateCount("count-applied", appliedCount);
+      setStatus("Conectado", "ok");
+      log("✓ Transição aplicada: " + transitionName, "ok");
+      markCmdStatus("done");
+    } else if (result === "no_selection") {
+      setStatus("Sem clipes compatíveis", "waiting");
+      log("⚠ Nenhum clipe compatível selecionado para a transição", "warn");
+      markCmdStatus("error_no_selection");
+    } else if (result === "not_found") {
+      setStatus("Transição não encontrada", "waiting");
+      log("⚠ Transição não encontrada: " + transitionName, "warn");
+      markCmdStatus("error_not_found");
+    } else {
+      setStatus("Erro ao aplicar transição", "error");
+      log("Erro: " + result, "err");
+      markCmdStatus("error");
+    }
+  });
+}
+
 // ——— 6. Inserir item do projeto ————————————————————————————————————————————————
 
 function insertProjectItem(cmd) {
@@ -760,6 +802,10 @@ function insertProjectItem(cmd) {
       setStatus("Item não encontrado", "waiting");
       log("⚠ Item do projeto não encontrado: " + itemName, "warn");
       markCmdStatus("error_not_found");
+    } else if (result === "not_inserted") {
+      setStatus("Item não entrou na timeline", "waiting");
+      log("⚠ Premiere localizou o item, mas não conseguiu inseri-lo na timeline: " + itemName, "warn");
+      markCmdStatus("error_not_inserted");
     } else if (result === "no_sequence") {
       setStatus("Sem sequência ativa", "waiting");
       log("⚠ Nenhuma sequência ativa para inserir item", "warn");
@@ -818,6 +864,10 @@ function insertGenericItem(cmd) {
       setStatus("Item não encontrado", "waiting");
       log("⚠ Item genérico não encontrado após criação/importação: " + itemName, "warn");
       markCmdStatus("error_not_found");
+    } else if (result === "not_inserted") {
+      setStatus("Item não entrou na timeline", "waiting");
+      log("⚠ Premiere criou/localizou o item, mas não conseguiu inseri-lo na timeline: " + itemName, "warn");
+      markCmdStatus("error_not_inserted");
     } else if (result === "no_sequence") {
       setStatus("Sem sequência ativa", "waiting");
       log("⚠ Nenhuma sequência ativa para inserir item", "warn");
@@ -873,6 +923,10 @@ function insertFavoriteItem(cmd) {
       setStatus("Favorito não encontrado", "waiting");
       log("⚠ Favorito não encontrado: " + itemName, "warn");
       markCmdStatus("error_not_found");
+    } else if (result === "not_inserted") {
+      setStatus("Favorito não entrou na timeline", "waiting");
+      log("⚠ Premiere importou/localizou o favorito, mas não conseguiu inseri-lo na timeline: " + itemName, "warn");
+      markCmdStatus("error_not_inserted");
     } else if (result === "no_sequence") {
       setStatus("Sem sequência ativa", "waiting");
       log("⚠ Nenhuma sequência ativa para inserir favorito", "warn");

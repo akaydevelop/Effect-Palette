@@ -71,6 +71,22 @@ function getEffectsList() {
       effects.push({ name: aname, category: "Audio", type: "audio" });
     }
 
+    var videoTransitions = _getTransitionList("video");
+    for (var vt = 0; vt < videoTransitions.length; vt++) {
+      var vtName = String(videoTransitions[vt]).trim();
+      if (!vtName || seen["transition_video:" + vtName]) continue;
+      seen["transition_video:" + vtName] = true;
+      effects.push({ name: vtName, category: "Transicoes > Video", type: "transition_video" });
+    }
+
+    var audioTransitions = _getTransitionList("audio");
+    for (var at = 0; at < audioTransitions.length; at++) {
+      var atName = String(audioTransitions[at]).trim();
+      if (!atName || seen["transition_audio:" + atName]) continue;
+      seen["transition_audio:" + atName] = true;
+      effects.push({ name: atName, category: "Transicoes > Audio", type: "transition_audio" });
+    }
+
     effects.sort(function(a, b) { return a.name.localeCompare(b.name); });
     return JSON.stringify(effects);
 
@@ -135,6 +151,70 @@ function getSelectionJSON() {
   } catch(e) {
     return "[]";
   }
+}
+
+var _BLEND_MODE_OPTIONS = [
+  { value: "0", label: "Normal" },
+  { value: "1", label: "Dissolve" },
+  { value: "2", label: "Darken" },
+  { value: "3", label: "Multiply" },
+  { value: "4", label: "Color Burn" },
+  { value: "5", label: "Linear Burn" },
+  { value: "6", label: "Darker Color" },
+  { value: "7", label: "Lighten" },
+  { value: "8", label: "Screen" },
+  { value: "9", label: "Color Dodge" },
+  { value: "10", label: "Linear Dodge (Add)" },
+  { value: "11", label: "Lighter Color" },
+  { value: "12", label: "Overlay" },
+  { value: "13", label: "Soft Light" },
+  { value: "14", label: "Hard Light" },
+  { value: "15", label: "Vivid Light" },
+  { value: "16", label: "Linear Light" },
+  { value: "17", label: "Pin Light" },
+  { value: "18", label: "Hard Mix" },
+  { value: "19", label: "Difference" },
+  { value: "20", label: "Exclusion" },
+  { value: "21", label: "Subtract" },
+  { value: "22", label: "Divide" },
+  { value: "23", label: "Hue" },
+  { value: "24", label: "Saturation" },
+  { value: "25", label: "Color" },
+  { value: "26", label: "Luminosity" },
+  { value: "27", label: "Stencil Alpha" },
+  { value: "28", label: "Silhouette Alpha" },
+  { value: "29", label: "Stencil Luma" },
+  { value: "30", label: "Silhouette Luma" }
+];
+
+function _blendModeValueFromInput(rawValue) {
+  var rawText = String(rawValue === undefined || rawValue === null ? "" : rawValue);
+  var normText = _normName(rawText);
+  for (var i = 0; i < _BLEND_MODE_OPTIONS.length; i++) {
+    var opt = _BLEND_MODE_OPTIONS[i];
+    if (_normName(opt.label || "") === normText) {
+      return parseInt(opt.value, 10);
+    }
+  }
+  var numeric = parseInt(rawText, 10);
+  if (!isNaN(numeric)) return numeric;
+  return null;
+}
+
+function _clipParamValueKind(rawValue) {
+  if (rawValue === true || rawValue === false) return "bool";
+  if (rawValue instanceof Array) {
+    if (rawValue.length === 2) return "point";
+    if (rawValue.length >= 3) return "color";
+    return "text";
+  }
+
+  var text = String(rawValue === undefined || rawValue === null ? "" : rawValue);
+  var lower = text.toLowerCase();
+  if (lower === "true" || lower === "false") return "bool";
+  if (/^-?\d+(\.\d+)?$/.test(text)) return "number";
+  if (/^-?\d+(\.\d+)?:-?\d+(\.\d+)?$/.test(text)) return "point";
+  return "text";
 }
 
 // ─── 3. Verificar se efeito existe ────────────────────────────────────────────
@@ -263,6 +343,33 @@ function getProjectItemsListSafe() {
   }
 }
 
+function _getTransitionList(kind) {
+  var list = null;
+  try {
+    if (kind === "audio") {
+      if (!qe.project || typeof qe.project.getAudioTransitionList !== "function") return [];
+      try { list = qe.project.getAudioTransitionList(0, false); } catch (e0) {}
+      if (!list) try { list = qe.project.getAudioTransitionList(false); } catch (e1) {}
+      if (!list) try { list = qe.project.getAudioTransitionList(); } catch (e2) {}
+    } else {
+      if (!qe.project || typeof qe.project.getVideoTransitionList !== "function") return [];
+      try { list = qe.project.getVideoTransitionList(0, false); } catch (e3) {}
+      if (!list) try { list = qe.project.getVideoTransitionList(false); } catch (e4) {}
+      if (!list) try { list = qe.project.getVideoTransitionList(); } catch (e5) {}
+    }
+  } catch (e) {
+    list = null;
+  }
+
+  var result = [];
+  if (!list || list.length === undefined) return result;
+  for (var i = 0; i < list.length; i++) {
+    var name = String(list[i] || "").trim();
+    if (name) result.push(name);
+  }
+  return result;
+}
+
 function getSequencesListSafe() {
   try {
     if (!app.project || !app.project.sequences) return "[]";
@@ -308,6 +415,32 @@ function getSequencesListSafe() {
   } catch (e) {
     return "Error: " + e.message;
   }
+}
+
+function _findSequenceByProjectItem(projectItem) {
+  if (!projectItem || !app.project || !app.project.sequences) return null;
+
+  var targetNodeId = "";
+  try { targetNodeId = String(projectItem.nodeId || ""); } catch (e0) {}
+
+  var total = 0;
+  try { total = app.project.sequences.numSequences || 0; } catch (e1) {}
+
+  for (var i = 0; i < total; i++) {
+    var sequence = null;
+    try { sequence = app.project.sequences[i]; } catch (e2) {}
+    if (!sequence || !sequence.projectItem) continue;
+
+    try {
+      if (sequence.projectItem === projectItem) return sequence;
+    } catch (e3) {}
+
+    try {
+      if (targetNodeId && String(sequence.projectItem.nodeId || "") === targetNodeId) return sequence;
+    } catch (e4) {}
+  }
+
+  return null;
 }
 
 function _findBinByName(projectItem, targetName) {
@@ -840,6 +973,514 @@ function _findClipByStartOnTrack(track, startTicks, clipName) {
   return null;
 }
 
+function _findClipByProjectItemAtStart(track, projectItem, startTicks) {
+  if (!track || !track.clips || !projectItem) return null;
+
+  var targetTicks = Number(startTicks) || 0;
+  var projectNodeId = "";
+  try { projectNodeId = String(projectItem.nodeId || ""); } catch (e0) {}
+
+  try {
+    for (var i = 0; i < track.clips.numItems; i++) {
+      var clip = track.clips[i];
+      if (!clip || !clip.start) continue;
+
+      var clipStart = Number(clip.start.ticks) || 0;
+      if (Math.abs(clipStart - targetTicks) > 200000) continue;
+
+      try {
+        if (clip.projectItem === projectItem) return clip;
+      } catch (e1) {}
+
+      try {
+        if (projectNodeId && clip.projectItem && String(clip.projectItem.nodeId || "") === projectNodeId) {
+          return clip;
+        }
+      } catch (e2) {}
+    }
+  } catch (e3) {}
+
+  return null;
+}
+
+function _collectSequenceTrackItems(sourceSequence) {
+  var out = [];
+  if (!sourceSequence) return out;
+
+  function collectFromTrackCollection(trackCollection, isAudio) {
+    if (!trackCollection) return;
+
+    try {
+      for (var ti = 0; ti < trackCollection.numTracks; ti++) {
+        var track = trackCollection[ti];
+        if (!track || !track.clips) continue;
+
+        for (var ci = 0; ci < track.clips.numItems; ci++) {
+          var clip = track.clips[ci];
+          if (!clip || !clip.projectItem || !clip.start || !clip.end) continue;
+
+          var startTicks = Number(clip.start.ticks) || 0;
+          var endTicks = Number(clip.end.ticks) || 0;
+          if (endTicks <= startTicks) continue;
+
+          out.push({
+            clip: clip,
+            projectItem: clip.projectItem,
+            isAudio: !!isAudio,
+            trackIndex: ti,
+            startTicks: startTicks,
+            endTicks: endTicks,
+            durationTicks: endTicks - startTicks
+          });
+        }
+      }
+    } catch (eTrack) {}
+  }
+
+  collectFromTrackCollection(sourceSequence.videoTracks, false);
+  collectFromTrackCollection(sourceSequence.audioTracks, true);
+
+  out.sort(function(a, b) {
+    if (a.startTicks !== b.startTicks) return a.startTicks - b.startTicks;
+    if (a.isAudio !== b.isAudio) return a.isAudio ? 1 : -1;
+    return a.trackIndex - b.trackIndex;
+  });
+
+  return out;
+}
+
+function _setProjectItemTrimFromTrackItem(projectItem, sourceClip, mediaType) {
+  if (!projectItem || !sourceClip) return false;
+
+  var applied = false;
+  try {
+    if (typeof projectItem.setInPoint === "function" && sourceClip.inPoint) {
+      var inSeconds = Number(sourceClip.inPoint.seconds);
+      if (!isNaN(inSeconds)) {
+        projectItem.setInPoint(inSeconds, mediaType);
+        applied = true;
+      }
+    }
+  } catch (e0) {}
+
+  try {
+    if (typeof projectItem.setOutPoint === "function" && sourceClip.outPoint) {
+      var outSeconds = Number(sourceClip.outPoint.seconds);
+      if (!isNaN(outSeconds)) {
+        projectItem.setOutPoint(outSeconds, mediaType);
+        applied = true;
+      }
+    }
+  } catch (e1) {}
+
+  return applied;
+}
+
+function _snapshotProjectItemTrim(projectItem) {
+  var snapshot = {
+    hasInPoint: false,
+    hasOutPoint: false,
+    inSeconds: 0,
+    outSeconds: 0
+  };
+  if (!projectItem) return snapshot;
+
+  try {
+    if (typeof projectItem.getInPoint === "function") {
+      var inPoint = projectItem.getInPoint();
+      if (inPoint) {
+        snapshot.hasInPoint = true;
+        snapshot.inSeconds = Number(inPoint.seconds) || 0;
+      }
+    }
+  } catch (e0) {}
+
+  try {
+    if (typeof projectItem.getOutPoint === "function") {
+      var outPoint = projectItem.getOutPoint();
+      if (outPoint) {
+        snapshot.hasOutPoint = true;
+        snapshot.outSeconds = Number(outPoint.seconds) || 0;
+      }
+    }
+  } catch (e1) {}
+
+  return snapshot;
+}
+
+function _restoreProjectItemTrim(projectItem, snapshot, mediaType) {
+  if (!projectItem || !snapshot) return;
+
+  try {
+    if (snapshot.hasInPoint && typeof projectItem.setInPoint === "function") {
+      projectItem.setInPoint(Number(snapshot.inSeconds) || 0, mediaType);
+    }
+  } catch (e0) {}
+
+  try {
+    if (snapshot.hasOutPoint && typeof projectItem.setOutPoint === "function") {
+      projectItem.setOutPoint(Number(snapshot.outSeconds) || 0, mediaType);
+    }
+  } catch (e1) {}
+}
+
+function _applyInsertedTrackItemTrim(insertedClip, sourceClip, targetStartTicks) {
+  if (!insertedClip || !sourceClip) return false;
+
+  var applied = false;
+  try {
+    if (sourceClip.inPoint) {
+      insertedClip.inPoint = _timeFromTicks(Number(sourceClip.inPoint.ticks) || 0);
+      applied = true;
+    }
+  } catch (e0) {}
+
+  try {
+    if (sourceClip.outPoint) {
+      insertedClip.outPoint = _timeFromTicks(Number(sourceClip.outPoint.ticks) || 0);
+      applied = true;
+    }
+  } catch (e1) {}
+
+  try {
+    insertedClip.start = _timeFromTicks(targetStartTicks);
+    applied = true;
+  } catch (e2) {}
+
+  try {
+    if (sourceClip.end && sourceClip.start) {
+      var durationTicks = (Number(sourceClip.end.ticks) || 0) - (Number(sourceClip.start.ticks) || 0);
+      if (durationTicks > 0) {
+        insertedClip.end = _timeFromTicks(targetStartTicks + durationTicks);
+        applied = true;
+      }
+    }
+  } catch (e3) {}
+
+  return applied;
+}
+
+function _isIntrinsicComponentName(componentName, isAudio) {
+  var key = _normName(componentName || "");
+  if (isAudio) {
+    return (
+      key === "volume" ||
+      key === "channel volume" ||
+      key === "panner" ||
+      key === "clip mixer" ||
+      key === "time remapping"
+    );
+  }
+
+  return (
+    key === "motion" ||
+    key === "opacity" ||
+    key === "time remapping" ||
+    key === "master clip" ||
+    key === "vector motion" ||
+    key === "vector motion opacity"
+  );
+}
+
+function _inferControlTypeFromRawValue(rawValue) {
+  var kind = _clipParamValueKind(rawValue);
+  if (kind === "point") return "6";
+  if (kind === "bool") return "4";
+  if (kind === "color") return "5";
+  if (kind === "number") return "2";
+  return "";
+}
+
+function _serializeComponentParamsForClone(component) {
+  var params = [];
+  if (!component || !component.properties) return params;
+
+  for (var i = 0; i < component.properties.numItems; i++) {
+    var prop = component.properties[i];
+    if (!prop) continue;
+
+    var propertyName = "";
+    var rawValue = null;
+    var isTimeVarying = false;
+
+    try { propertyName = String(prop.displayName || ""); } catch (e0) {}
+    if (!propertyName) continue;
+    if (_normName(propertyName) === "bypass") continue;
+
+    try {
+      if (typeof prop.isTimeVarying === "function") {
+        isTimeVarying = !!prop.isTimeVarying();
+      }
+    } catch (e1) {}
+    if (isTimeVarying) continue;
+
+    try {
+      if (typeof prop.getValue === "function") rawValue = prop.getValue();
+    } catch (e2) {
+      rawValue = null;
+    }
+    if (rawValue === null || rawValue === undefined) continue;
+
+    params.push({
+      name: propertyName,
+      value: _safeValueToString(rawValue),
+      controlType: _inferControlTypeFromRawValue(rawValue),
+      paramIndex: i
+    });
+  }
+
+  return params;
+}
+
+function _cloneComponentPropertyValue(sourceProp, targetProp, propertyName) {
+  if (!sourceProp || !targetProp) return false;
+
+  var rawValue = null;
+  var isTimeVarying = false;
+  var controlType = "";
+  var applied = false;
+
+  try {
+    if (typeof sourceProp.isTimeVarying === "function") {
+      isTimeVarying = !!sourceProp.isTimeVarying();
+    }
+  } catch (e0) {}
+
+  if (isTimeVarying) {
+    var keys = null;
+    try {
+      if (typeof sourceProp.getKeys === "function") {
+        keys = sourceProp.getKeys();
+      }
+    } catch (eKeys) {
+      keys = null;
+    }
+
+    if (keys && keys.length) {
+      try {
+        if (typeof targetProp.setTimeVarying === "function") {
+          targetProp.setTimeVarying(true);
+        }
+      } catch (eSetTv) {}
+
+      for (var ki = 0; ki < keys.length; ki++) {
+        var keyTime = keys[ki];
+        if (!keyTime) continue;
+
+        var keyValue = null;
+        try {
+          if (typeof sourceProp.getValueAtKey === "function") {
+            keyValue = sourceProp.getValueAtKey(keyTime);
+          }
+        } catch (eValueAtKey) {
+          keyValue = null;
+        }
+        if (keyValue === null || keyValue === undefined) continue;
+
+        controlType = _inferControlTypeFromRawValue(keyValue);
+        try { targetProp.addKey(keyTime); } catch (eAdd) {}
+        try {
+          _applyKeyValueAtTime(targetProp, _safeValueToString(keyValue), keyTime, controlType);
+          applied = true;
+        } catch (eApplyKey) {}
+      }
+      return applied;
+    }
+  }
+
+  try {
+    if (typeof sourceProp.getValue === "function") rawValue = sourceProp.getValue();
+  } catch (e1) {
+    rawValue = null;
+  }
+  if (rawValue === null || rawValue === undefined) return false;
+
+  controlType = _inferControlTypeFromRawValue(rawValue);
+  try {
+    _applyLiteralParamValue(targetProp, _safeValueToString(rawValue), controlType, propertyName);
+    return true;
+  } catch (e2) {}
+
+  return false;
+}
+
+function _cloneComponentParams(sourceComponent, targetComponent) {
+  if (!sourceComponent || !sourceComponent.properties || !targetComponent || !targetComponent.properties) return 0;
+
+  var copied = 0;
+  for (var pi = 0; pi < sourceComponent.properties.numItems; pi++) {
+    var sourceProp = sourceComponent.properties[pi];
+    if (!sourceProp) continue;
+
+    var propertyName = "";
+    try { propertyName = String(sourceProp.displayName || ""); } catch (e0) {}
+    if (!propertyName) continue;
+    if (_normName(propertyName) === "bypass") continue;
+
+    var targetProp = _findClipProperty(targetComponent, propertyName, pi);
+    if (!targetProp) continue;
+
+    if (_cloneComponentPropertyValue(sourceProp, targetProp, propertyName)) {
+      copied++;
+    }
+  }
+
+  return copied;
+}
+
+function _cloneExtraComponentsToInsertedClip(sourceClip, targetStdClip, targetQeClip, isAudio) {
+  if (!sourceClip || !sourceClip.components || !targetStdClip || !targetQeClip) return 0;
+
+  var copied = 0;
+  for (var ci = 0; ci < sourceClip.components.numItems; ci++) {
+    var sourceComp = sourceClip.components[ci];
+    if (!sourceComp) continue;
+
+    var displayName = "";
+    var matchName = "";
+    try { displayName = String(sourceComp.displayName || ""); } catch (e0) {}
+    try { matchName = String(sourceComp.matchName || ""); } catch (e1) {}
+    if (!displayName) continue;
+    if (_isIntrinsicComponentName(displayName, isAudio)) continue;
+
+    var effectMeta = {
+      displayName: displayName,
+      matchName: matchName,
+      resolvedEffectName: displayName
+    };
+    var effectObj = _resolveEffectObject(displayName, matchName, !!isAudio, effectMeta);
+    if (!effectObj) continue;
+
+    var beforeSnapshots = _snapshotNamedComponents(targetStdClip, displayName, effectMeta);
+    try {
+      if (isAudio) {
+        targetQeClip.addAudioEffect(effectObj);
+      } else {
+        targetQeClip.addVideoEffect(effectObj);
+      }
+    } catch (eAdd) {
+      continue;
+    }
+
+    var addedEffect = _findNewlyAddedComponent(targetStdClip, displayName, beforeSnapshots, effectMeta);
+    if (!addedEffect) continue;
+
+    try {
+      _cloneComponentParams(sourceComp, addedEffect);
+    } catch (eApply) {}
+
+    if (isAudio) {
+      _cleanupDuplicateAudioComponents(targetStdClip, displayName, addedEffect);
+    }
+    copied++;
+  }
+
+  return copied;
+}
+
+function _insertSequenceContentsAtPlayhead(targetSequence, sourceSequence, selectionJSON) {
+  if (!targetSequence || !sourceSequence) return 0;
+  if (targetSequence === sourceSequence) return 0;
+
+  var sourceEntries = _collectSequenceTrackItems(sourceSequence);
+  if (!sourceEntries.length) return 0;
+
+  var qeSequence = null;
+  try {
+    app.enableQE();
+    if (typeof qe !== "undefined" && qe.project) {
+      qeSequence = qe.project.getActiveSequence();
+    }
+  } catch (eQe) {}
+
+  var baseTracks = _resolveInsertionTracks(targetSequence, selectionJSON);
+  var minSourceTicks = null;
+  var insertedCount = 0;
+
+  for (var i = 0; i < sourceEntries.length; i++) {
+    if (minSourceTicks === null || sourceEntries[i].startTicks < minSourceTicks) {
+      minSourceTicks = sourceEntries[i].startTicks;
+    }
+  }
+  if (minSourceTicks === null) minSourceTicks = 0;
+
+  var playhead = targetSequence.getPlayerPosition();
+  if (!playhead) return 0;
+  var insertionBaseTicks = Number(playhead.ticks !== undefined ? playhead.ticks : playhead) || 0;
+
+  for (var ei = 0; ei < sourceEntries.length; ei++) {
+    var entry = sourceEntries[ei];
+    if (!entry || !entry.projectItem) continue;
+
+    var relativeStartTicks = entry.startTicks - minSourceTicks;
+    var targetStartTicks = insertionBaseTicks + Math.max(0, relativeStartTicks);
+    var targetTrackIndex = (entry.isAudio ? baseTracks.audioTrackIndex : baseTracks.videoTrackIndex) + entry.trackIndex;
+    var targetTrack = null;
+
+    if (entry.isAudio) {
+      if (!_ensureAudioTrackIndex(targetSequence, targetTrackIndex)) continue;
+      try { targetTrack = targetSequence.audioTracks[targetTrackIndex]; } catch (eAudioTrack) {}
+    } else {
+      if (!_ensureVideoTrackIndex(targetSequence, targetTrackIndex)) continue;
+      try { targetTrack = targetSequence.videoTracks[targetTrackIndex]; } catch (eVideoTrack) {}
+    }
+    if (!targetTrack) continue;
+
+    var mediaType = entry.isAudio ? 2 : 1;
+    var trimSnapshot = _snapshotProjectItemTrim(entry.projectItem);
+    _setProjectItemTrimFromTrackItem(entry.projectItem, entry.clip, mediaType);
+
+    var inserted = false;
+    try {
+      targetTrack.overwriteClip(entry.projectItem, String(targetStartTicks));
+      inserted = true;
+    } catch (eOverwriteTicks) {
+      try {
+        targetTrack.overwriteClip(entry.projectItem, _timeFromTicks(targetStartTicks));
+        inserted = true;
+      } catch (eOverwriteTime) {
+        if (typeof targetTrack.insertClip === "function") {
+          try {
+            targetTrack.insertClip(entry.projectItem, _timeFromTicks(targetStartTicks));
+            inserted = true;
+          } catch (eInsert) {}
+        }
+      }
+    }
+
+    _restoreProjectItemTrim(entry.projectItem, trimSnapshot, mediaType);
+
+    if (!inserted) continue;
+
+    var insertedClip = _findClipByProjectItemAtStart(targetTrack, entry.projectItem, targetStartTicks) ||
+      _findClipByStartOnTrack(targetTrack, targetStartTicks, String(entry.projectItem.name || ""));
+    if (insertedClip) {
+      _applyInsertedTrackItemTrim(insertedClip, entry.clip, targetStartTicks);
+
+      var qeTrack = null;
+      var qeClip = null;
+      try {
+        if (qeSequence) {
+          qeTrack = entry.isAudio
+            ? qeSequence.getAudioTrackAt(targetTrackIndex)
+            : qeSequence.getVideoTrackAt(targetTrackIndex);
+        }
+      } catch (eQeTrack) {}
+      try {
+        qeClip = _findQeClipOnTrack(qeTrack, targetStartTicks);
+      } catch (eQeClip) {}
+
+      if (qeClip) {
+        _cloneExtraComponentsToInsertedClip(entry.clip, insertedClip, qeClip, entry.isAudio);
+      }
+    }
+
+    insertedCount++;
+  }
+
+  return insertedCount;
+}
+
 function _extensionRootFsPath() {
   try {
     return File($.fileName).parent.parent.fsName;
@@ -1091,6 +1732,78 @@ function _findSequenceProjectItemByName(sequenceName) {
   }
 
   return null;
+}
+
+function _trackClipCount(track) {
+  try {
+    if (track && track.clips) return Number(track.clips.numItems) || 0;
+  } catch (e) {}
+  return 0;
+}
+
+function _captureInsertionState(sequence, tracks, insertionTicks, mediaKinds) {
+  var state = {
+    videoCount: 0,
+    audioCount: 0,
+    videoBusy: false,
+    audioBusy: false
+  };
+
+  if (mediaKinds && mediaKinds.hasVideo && sequence && sequence.videoTracks && sequence.videoTracks[tracks.videoTrackIndex]) {
+    state.videoCount = _trackClipCount(sequence.videoTracks[tracks.videoTrackIndex]);
+    state.videoBusy = _trackHasClipAtTicks(sequence.videoTracks[tracks.videoTrackIndex], insertionTicks);
+  }
+  if (mediaKinds && mediaKinds.hasAudio && sequence && sequence.audioTracks && sequence.audioTracks[tracks.audioTrackIndex]) {
+    state.audioCount = _trackClipCount(sequence.audioTracks[tracks.audioTrackIndex]);
+    state.audioBusy = _trackHasClipAtTicks(sequence.audioTracks[tracks.audioTrackIndex], insertionTicks);
+  }
+
+  return state;
+}
+
+function _projectItemAppearedOnTimeline(sequence, projectItem, tracks, insertionTicks, mediaKinds, beforeState) {
+  if (!sequence || !projectItem || !tracks || !mediaKinds) return false;
+
+  var itemName = "";
+  var isSequence = false;
+  try { itemName = String(projectItem.name || ""); } catch (e0) {}
+  try { isSequence = !!(typeof projectItem.isSequence === "function" && projectItem.isSequence()); } catch (e1) {}
+
+  var afterState = _captureInsertionState(sequence, tracks, insertionTicks, mediaKinds);
+
+  if (beforeState) {
+    if (mediaKinds.hasVideo) {
+      if (afterState.videoCount > beforeState.videoCount) return true;
+      if (!beforeState.videoBusy && afterState.videoBusy) return true;
+    }
+    if (mediaKinds.hasAudio) {
+      if (afterState.audioCount > beforeState.audioCount) return true;
+      if (!beforeState.audioBusy && afterState.audioBusy) return true;
+    }
+  }
+
+  if (mediaKinds.hasVideo && sequence.videoTracks && sequence.videoTracks[tracks.videoTrackIndex]) {
+    if (_findClipByStartOnTrack(sequence.videoTracks[tracks.videoTrackIndex], insertionTicks, itemName)) {
+      return true;
+    }
+  }
+
+  if (mediaKinds.hasAudio && sequence.audioTracks && sequence.audioTracks[tracks.audioTrackIndex]) {
+    if (_findClipByStartOnTrack(sequence.audioTracks[tracks.audioTrackIndex], insertionTicks, itemName)) {
+      return true;
+    }
+  }
+
+  if (isSequence) {
+    if (mediaKinds.hasVideo && sequence.videoTracks && sequence.videoTracks[tracks.videoTrackIndex] && _trackHasClipAtTicks(sequence.videoTracks[tracks.videoTrackIndex], insertionTicks)) {
+      return true;
+    }
+    if (mediaKinds.hasAudio && sequence.audioTracks && sequence.audioTracks[tracks.audioTrackIndex] && _trackHasClipAtTicks(sequence.audioTracks[tracks.audioTrackIndex], insertionTicks)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function _resolveTemplateProjectPath(rawProjectPath) {
@@ -1354,6 +2067,9 @@ function _insertResolvedProjectItem(sequence, projectItem, selectionJSON, explic
   var result = null;
   var timeSeconds = String(playhead.seconds);
   var timeTicks = String(playheadTicks);
+  var isSequenceProjectItem = false;
+
+  try { isSequenceProjectItem = !!(typeof projectItem.isSequence === "function" && projectItem.isSequence()); } catch (eSeq) {}
 
   if (selectionSpan) {
     insertionTicks = selectionSpan.startTicks;
@@ -1361,32 +2077,103 @@ function _insertResolvedProjectItem(sequence, projectItem, selectionJSON, explic
     timeSeconds = String(insertionTicks / 254016000000);
   }
 
-  if (mediaKinds.hasVideo) {
+  if (!isSequenceProjectItem && mediaKinds.hasVideo) {
     tracks.videoTrackIndex = selectionSpan
       ? _findAvailableVideoTrackInRange(sequence, tracks.videoTrackIndex, selectionSpan.startTicks, selectionSpan.endTicks)
       : _findAvailableVideoTrackAtTicks(sequence, tracks.videoTrackIndex, insertionTicks);
   }
-  if (mediaKinds.hasAudio) {
+  if (!isSequenceProjectItem && mediaKinds.hasAudio) {
     tracks.audioTrackIndex = _findAvailableAudioTrackAtTicks(sequence, tracks.audioTrackIndex, insertionTicks);
   }
 
-  try {
-    if (mediaKinds.hasVideo && !mediaKinds.hasAudio && sequence.videoTracks[tracks.videoTrackIndex]) {
-      result = sequence.videoTracks[tracks.videoTrackIndex].overwriteClip(projectItem, timeTicks);
-    } else if (!mediaKinds.hasVideo && mediaKinds.hasAudio && sequence.audioTracks[tracks.audioTrackIndex]) {
-      result = sequence.audioTracks[tracks.audioTrackIndex].overwriteClip(projectItem, timeTicks);
-    } else {
-      result = sequence.overwriteClip(projectItem, timeSeconds, tracks.videoTrackIndex, tracks.audioTrackIndex);
-    }
-  } catch (e1) {
+  var beforeInsertState = _captureInsertionState(sequence, tracks, insertionTicks, mediaKinds);
+
+  function attemptInsert(fn) {
     try {
-      result = sequence.insertClip(projectItem, playhead, tracks.videoTrackIndex, tracks.audioTrackIndex);
-    } catch (e2) {
+      result = fn();
+    } catch (eAttempt) {
+      return false;
+    }
+    if (result === false) return false;
+    return _projectItemAppearedOnTimeline(sequence, projectItem, tracks, insertionTicks, mediaKinds, beforeInsertState);
+  }
+
+  var inserted = false;
+
+  if (isSequenceProjectItem) {
+    var sourceSequence = _findSequenceByProjectItem(projectItem);
+    var flattenedCount = 0;
+    if (sourceSequence && sourceSequence !== sequence) {
       try {
-        result = sequence.insertClip(projectItem, String(playhead.ticks), tracks.videoTrackIndex, tracks.audioTrackIndex);
-      } catch (e3) {
-        return "Error: " + e3.message;
+        flattenedCount = _insertSequenceContentsAtPlayhead(sequence, sourceSequence, selectionJSON);
+      } catch (flattenErr) {
+        flattenedCount = 0;
       }
+    }
+
+    if (flattenedCount > 0) {
+      inserted = true;
+    } else {
+      inserted = attemptInsert(function() {
+        return sequence.overwriteClip(projectItem, timeSeconds, tracks.videoTrackIndex, tracks.audioTrackIndex);
+      });
+      if (!inserted) {
+        inserted = attemptInsert(function() {
+          return sequence.insertClip(projectItem, playhead, tracks.videoTrackIndex, tracks.audioTrackIndex);
+        });
+      }
+      if (!inserted) {
+        inserted = attemptInsert(function() {
+          return sequence.insertClip(projectItem, _timeFromTicks(insertionTicks), tracks.videoTrackIndex, tracks.audioTrackIndex);
+        });
+      }
+    }
+  } else if (mediaKinds.hasVideo && !mediaKinds.hasAudio && sequence.videoTracks[tracks.videoTrackIndex]) {
+    inserted = attemptInsert(function() {
+      return sequence.videoTracks[tracks.videoTrackIndex].overwriteClip(projectItem, timeTicks);
+    });
+    if (!inserted) {
+      inserted = attemptInsert(function() {
+        return sequence.videoTracks[tracks.videoTrackIndex].overwriteClip(projectItem, _timeFromTicks(insertionTicks));
+      });
+    }
+    if (!inserted && typeof sequence.videoTracks[tracks.videoTrackIndex].insertClip === "function") {
+      inserted = attemptInsert(function() {
+        return sequence.videoTracks[tracks.videoTrackIndex].insertClip(projectItem, _timeFromTicks(insertionTicks));
+      });
+    }
+  } else if (!mediaKinds.hasVideo && mediaKinds.hasAudio && sequence.audioTracks[tracks.audioTrackIndex]) {
+    inserted = attemptInsert(function() {
+      return sequence.audioTracks[tracks.audioTrackIndex].overwriteClip(projectItem, timeTicks);
+    });
+    if (!inserted) {
+      inserted = attemptInsert(function() {
+        return sequence.audioTracks[tracks.audioTrackIndex].overwriteClip(projectItem, _timeFromTicks(insertionTicks));
+      });
+    }
+    if (!inserted && typeof sequence.audioTracks[tracks.audioTrackIndex].insertClip === "function") {
+      inserted = attemptInsert(function() {
+        return sequence.audioTracks[tracks.audioTrackIndex].insertClip(projectItem, _timeFromTicks(insertionTicks));
+      });
+    }
+  } else {
+    inserted = attemptInsert(function() {
+      return sequence.overwriteClip(projectItem, timeSeconds, tracks.videoTrackIndex, tracks.audioTrackIndex);
+    });
+    if (!inserted) {
+      inserted = attemptInsert(function() {
+        return sequence.insertClip(projectItem, playhead, tracks.videoTrackIndex, tracks.audioTrackIndex);
+      });
+    }
+    if (!inserted) {
+      inserted = attemptInsert(function() {
+        return sequence.insertClip(projectItem, String(insertionTicks), tracks.videoTrackIndex, tracks.audioTrackIndex);
+      });
+    }
+    if (!inserted && mediaKinds.hasVideo && sequence.videoTracks[tracks.videoTrackIndex]) {
+      inserted = attemptInsert(function() {
+        return sequence.videoTracks[tracks.videoTrackIndex].overwriteClip(projectItem, timeTicks);
+      });
     }
   }
 
@@ -1403,7 +2190,7 @@ function _insertResolvedProjectItem(sequence, projectItem, selectionJSON, explic
     }
   }
 
-  if (result === false) return "Error: overwriteClip retornou false.";
+  if (!inserted) return "not_inserted";
   return "ok";
 }
 
@@ -1639,6 +2426,96 @@ function applyEffectWithSelection(effectName, effectType, selectionJSON) {
 
 // ─── 5. Aplicar preset com seleção passada como parâmetro ────────────────────
 
+function _resolveTransitionObject(transitionName, transitionType) {
+  var names = _getTransitionList(transitionType);
+  var resolvedName = null;
+  var normalTarget = normalize(transitionName);
+
+  for (var i = 0; i < names.length; i++) {
+    var candidate = String(names[i]).trim();
+    if (normalize(candidate) === normalTarget) {
+      resolvedName = candidate;
+      break;
+    }
+  }
+
+  if (!resolvedName) return null;
+
+  try {
+    if (transitionType === "audio") {
+      if (!qe.project || typeof qe.project.getAudioTransitionByName !== "function") return null;
+      try { return qe.project.getAudioTransitionByName(resolvedName, false); } catch (e0) {}
+      try { return qe.project.getAudioTransitionByName(resolvedName); } catch (e1) {}
+      return null;
+    }
+
+    if (!qe.project || typeof qe.project.getVideoTransitionByName !== "function") return null;
+    try { return qe.project.getVideoTransitionByName(resolvedName, false); } catch (e2) {}
+    try { return qe.project.getVideoTransitionByName(resolvedName); } catch (e3) {}
+  } catch (e) {}
+
+  return null;
+}
+
+function applyTransitionWithSelection(transitionName, transitionType, transitionPlacement, selectionJSON) {
+  try {
+    app.enableQE();
+    if (typeof qe === "undefined" || !qe.project) {
+      return "Error: QE DOM não disponível.";
+    }
+
+    var selection = JSON.parse(selectionJSON);
+    if (!selection || selection.length === 0) return "no_selection";
+
+    var isAudioTransition = String(transitionType || "video") === "audio";
+    var transitionObj = _resolveTransitionObject(transitionName, isAudioTransition ? "audio" : "video");
+    if (!transitionObj) return "not_found";
+
+    var qeSequence = qe.project.getActiveSequence();
+    if (!qeSequence) return "Error: Nenhuma sequência ativa.";
+
+    var applied = 0;
+    var placement = String(transitionPlacement || "auto").toLowerCase();
+
+    for (var s = 0; s < selection.length; s++) {
+      var saved = selection[s];
+      if (!!saved.isAudio !== isAudioTransition) continue;
+
+      var qeTrack = isAudioTransition
+        ? qeSequence.getAudioTrackAt(saved.trackIndex)
+        : qeSequence.getVideoTrackAt(saved.trackIndex);
+
+      var qeClip = _findQeClipOnTrack(qeTrack, saved.startTicks);
+      if (!qeClip || typeof qeClip.addTransition !== "function") continue;
+
+      var targetClip = qeClip;
+      if (placement === "start") {
+        var previousClip = _findQeClipEndingAtTicks(qeTrack, saved.startTicks);
+        if (previousClip && typeof previousClip.addTransition === "function") {
+          targetClip = previousClip;
+        }
+      }
+
+      try {
+        if (placement === "start" && targetClip === qeClip) {
+          try {
+            qeClip.addTransition(transitionObj, true);
+          } catch (eStart) {
+            qeClip.addTransition(transitionObj);
+          }
+        } else {
+          targetClip.addTransition(transitionObj);
+        }
+        applied++;
+      } catch (eClip) {}
+    }
+
+    return applied > 0 ? "ok" : "no_selection";
+  } catch (e) {
+    return "Error: " + e.message;
+  }
+}
+
 function _normName(str) {
   return String(str).toLowerCase().replace(/[\u2018\u2019']/g, "'").trim();
 }
@@ -1652,6 +2529,17 @@ function _findQeClipOnTrack(qeTrack, startTicks) {
   for (var i = 0; i < qeTrack.numItems; i++) {
     var qeClip = qeTrack.getItemAt(i);
     if (qeClip && _ticksClose(qeClip.start.ticks, startTicks)) {
+      return qeClip;
+    }
+  }
+  return null;
+}
+
+function _findQeClipEndingAtTicks(qeTrack, endTicks) {
+  if (!qeTrack) return null;
+  for (var i = 0; i < qeTrack.numItems; i++) {
+    var qeClip = qeTrack.getItemAt(i);
+    if (qeClip && qeClip.end && _ticksClose(qeClip.end.ticks, endTicks)) {
       return qeClip;
     }
   }
@@ -2120,10 +3008,19 @@ function _applyBooleanValue(targetProp, rawText) {
   return false;
 }
 
-function _applyLiteralParamValue(targetProp, rawValue, controlType) {
+function _applyLiteralParamValue(targetProp, rawValue, controlType, propertyName) {
   if (rawValue === null || rawValue === undefined) return;
   var rawText = String(rawValue);
   var ctype = String(controlType || "");
+  var propKey = _normName(propertyName || "");
+
+  if (propKey === "blend mode") {
+    var blendModeValue = _blendModeValueFromInput(rawText);
+    if (blendModeValue !== null && !isNaN(blendModeValue)) {
+      targetProp.setValue(blendModeValue, true);
+      return;
+    }
+  }
 
   if (ctype === "6" && rawText.indexOf(":") !== -1) {
     var coords = rawText.split(":");
@@ -2482,6 +3379,148 @@ function _cleanupDuplicateAudioComponents(stdClip, displayName, keepComponent) {
   }
 }
 
+function _removeTrackItemIfPossible(trackItem) {
+  if (!trackItem) return false;
+
+  try {
+    if (typeof trackItem.remove === "function") {
+      trackItem.remove(false, true);
+      return true;
+    }
+  } catch (e0) {}
+
+  try {
+    if (typeof trackItem.remove === "function") {
+      trackItem.remove(false);
+      return true;
+    }
+  } catch (e1) {}
+
+  try {
+    if (typeof trackItem.remove === "function") {
+      trackItem.remove();
+      return true;
+    }
+  } catch (e2) {}
+
+  return false;
+}
+
+function _applyFilterPresetsToContext(ctx, targetFilterPresets, kind) {
+  var stats = { applied: 0, partial: 0 };
+  if (!ctx || !ctx.stdClip || !ctx.qeClip || !targetFilterPresets || !targetFilterPresets.length) {
+    return stats;
+  }
+
+  for (var f = 0; f < targetFilterPresets.length; f++) {
+    var fp = targetFilterPresets[f];
+    var isAudioFx = fp.isAudio;
+
+    var effectObj = _resolveEffectObject(fp.displayName, fp.matchName, isAudioFx, fp);
+    if (!effectObj) { stats.partial++; continue; }
+
+    var beforeSnapshots = _snapshotNamedComponents(ctx.stdClip, fp.displayName, fp);
+
+    try {
+      if (isAudioFx) {
+        ctx.qeClip.addAudioEffect(effectObj);
+      } else {
+        ctx.qeClip.addVideoEffect(effectObj);
+      }
+      stats.applied++;
+    } catch (e1) {
+      stats.partial++;
+      continue;
+    }
+
+    var addedEffect = _findNewlyAddedComponent(ctx.stdClip, fp.displayName, beforeSnapshots, fp);
+    if (!addedEffect) {
+      stats.partial++;
+      continue;
+    }
+
+    try {
+      _applyPresetParams(addedEffect, fp.params, ctx.stdClip, ctx.saved, fp);
+    } catch (e2) {
+      stats.partial++;
+    }
+
+    if (isAudioFx) {
+      _cleanupDuplicateAudioComponents(ctx.stdClip, fp.displayName, addedEffect);
+    }
+  }
+
+  return stats;
+}
+
+function _createPresetHelperContext(sequence, qeSequence, targetCtx) {
+  if (!sequence || !qeSequence || !targetCtx || !targetCtx.stdClip) return null;
+
+  var helperItem = _createGenericProjectItem("black_video", sequence);
+  if (!helperItem || typeof helperItem === "string") return null;
+
+  var timing = _buildKeyframeTimingInfo(targetCtx.stdClip, targetCtx.saved);
+  var startTicks = Number((targetCtx.saved && targetCtx.saved.startTicks) || timing.startTicks) || 0;
+  var endTicks = Number((targetCtx.saved && targetCtx.saved.endTicks) || timing.endTicks) || 0;
+  if (endTicks <= startTicks) return null;
+
+  var helperTrackIndex = sequence.videoTracks ? sequence.videoTracks.numTracks : 0;
+  if (!_ensureVideoTrackIndex(sequence, helperTrackIndex)) return null;
+
+  var helperTrack = null;
+  var qeHelperTrack = null;
+  try { helperTrack = sequence.videoTracks[helperTrackIndex]; } catch (eTrack) {}
+  try { qeHelperTrack = qeSequence.getVideoTrackAt(helperTrackIndex); } catch (eQeTrack) {}
+  if (!helperTrack) return null;
+
+  var inserted = false;
+  try {
+    helperTrack.overwriteClip(helperItem, String(startTicks));
+    inserted = true;
+  } catch (e0) {
+    try {
+      helperTrack.overwriteClip(helperItem, _timeFromTicks(startTicks));
+      inserted = true;
+    } catch (e1) {
+      if (typeof helperTrack.insertClip === "function") {
+        try {
+          helperTrack.insertClip(helperItem, _timeFromTicks(startTicks));
+          inserted = true;
+        } catch (e2) {}
+      }
+    }
+  }
+  if (!inserted) return null;
+
+  var helperStdClip = _findClipByProjectItemAtStart(helperTrack, helperItem, startTicks) ||
+    _findClipByStartOnTrack(helperTrack, startTicks, String(helperItem.name || ""));
+  var helperQeClip = null;
+  try { helperQeClip = _findQeClipOnTrack(qeHelperTrack, startTicks); } catch (eQeClip) {}
+  if (!helperStdClip || !helperQeClip) return null;
+
+  try {
+    helperStdClip.end = _timeFromTicks(endTicks);
+  } catch (eTrim) {}
+
+  return {
+    qeClip: helperQeClip,
+    stdClip: helperStdClip,
+    trackIndex: helperTrackIndex,
+    saved: {
+      startTicks: String(startTicks),
+      endTicks: String(endTicks),
+      inPointTicks: helperStdClip.inPoint && helperStdClip.inPoint.ticks !== undefined ? helperStdClip.inPoint.ticks : "",
+      outPointTicks: helperStdClip.outPoint && helperStdClip.outPoint.ticks !== undefined ? helperStdClip.outPoint.ticks : "",
+      clipName: String(helperStdClip.name || ""),
+      trackIndex: helperTrackIndex,
+      isAudio: false,
+      isImageLike: false,
+      isAdjustmentLike: false,
+      looksLikeInfiniteStill: false
+    }
+  };
+}
+
 function applyPresetWithSelection(filterPresetsJSON, selectionJSON) {
   try {
     app.enableQE();
@@ -2531,45 +3570,35 @@ function applyPresetWithSelection(filterPresetsJSON, selectionJSON) {
         var ctx = uniqueTargets[kind][key];
 
         var targetFilterPresets = _filterPresetsForTarget(filterPresets, kind === "audio");
-        if (kind === "video" && _presetHasAnimatedParams(targetFilterPresets)) {
-          _ensureStillImageKeyframeHelper(ctx);
-        }
-        for (var f = 0; f < targetFilterPresets.length; f++) {
-          var fp = targetFilterPresets[f];
-          var isAudioFx = fp.isAudio;
+        var isAnimatedVideoPreset = kind === "video" && _presetHasAnimatedParams(targetFilterPresets);
+        var timingInfo = _buildKeyframeTimingInfo(ctx.stdClip, ctx.saved);
+        var usedHelper = false;
 
-          var effectObj = _resolveEffectObject(fp.displayName, fp.matchName, isAudioFx, fp);
-          if (!effectObj) { partial++; continue; }
+        if (isAnimatedVideoPreset && timingInfo && timingInfo.looksLikeInfiniteStill) {
+          var helperCtx = _createPresetHelperContext(sequence, qeSequence, ctx);
+          if (helperCtx) {
+            var helperStats = _applyFilterPresetsToContext(helperCtx, targetFilterPresets, kind);
+            applied += helperStats.applied;
+            partial += helperStats.partial;
 
-          var beforeSnapshots = _snapshotNamedComponents(ctx.stdClip, fp.displayName, fp);
-
-          try {
-            if (isAudioFx) {
-              ctx.qeClip.addAudioEffect(effectObj);
-            } else {
-              ctx.qeClip.addVideoEffect(effectObj);
+            try {
+              _cloneExtraComponentsToInsertedClip(helperCtx.stdClip, ctx.stdClip, ctx.qeClip, false);
+              usedHelper = true;
+            } catch (eClone) {
+              partial++;
             }
-            applied++;
-          } catch (e1) {
-            partial++;
-            continue;
-          }
 
-          var addedEffect = _findNewlyAddedComponent(ctx.stdClip, fp.displayName, beforeSnapshots, fp);
-          if (!addedEffect) {
-            partial++;
-            continue;
+            _removeTrackItemIfPossible(helperCtx.stdClip);
           }
+        }
 
-          try {
-            _applyPresetParams(addedEffect, fp.params, ctx.stdClip, ctx.saved, fp);
-          } catch (e2) {
-            partial++;
+        if (!usedHelper) {
+          if (isAnimatedVideoPreset) {
+            _ensureStillImageKeyframeHelper(ctx);
           }
-
-          if (isAudioFx) {
-            _cleanupDuplicateAudioComponents(ctx.stdClip, fp.displayName, addedEffect);
-          }
+          var directStats = _applyFilterPresetsToContext(ctx, targetFilterPresets, kind);
+          applied += directStats.applied;
+          partial += directStats.partial;
         }
       }
     }
@@ -2581,6 +3610,94 @@ function applyPresetWithSelection(filterPresetsJSON, selectionJSON) {
   } catch (e) {
     return "Error: " + e.message;
   }
+}
+
+function _findClipComponent(stdClip, componentName, componentIndex) {
+  if (!stdClip || !stdClip.components) return null;
+
+  var index = parseInt(componentIndex, 10);
+  if (!isNaN(index) && index >= 0 && index < stdClip.components.numItems) {
+    var indexedComponent = stdClip.components[index];
+    if (indexedComponent) {
+      var indexedName = "";
+      try { indexedName = String(indexedComponent.displayName || ""); } catch (e0) {}
+      if (!componentName || _normName(indexedName) === _normName(componentName)) {
+        return indexedComponent;
+      }
+    }
+  }
+
+  var targetName = _normName(componentName || "");
+  for (var i = 0; i < stdClip.components.numItems; i++) {
+    var comp = stdClip.components[i];
+    if (!comp) continue;
+    if (!targetName) return comp;
+    if (_normName(comp.displayName || "") === targetName) return comp;
+  }
+
+  return null;
+}
+
+function _findClipProperty(component, propertyName, propertyIndex) {
+  if (!component || !component.properties) return null;
+
+  var index = parseInt(propertyIndex, 10);
+  if (!isNaN(index) && index >= 0 && index < component.properties.numItems) {
+    var indexedProperty = component.properties[index];
+    if (indexedProperty) {
+      var indexedName = "";
+      try { indexedName = String(indexedProperty.displayName || ""); } catch (e0) {}
+      if (!propertyName || _normName(indexedName) === _normName(propertyName)) {
+        return indexedProperty;
+      }
+    }
+  }
+
+  var targetName = _normName(propertyName || "");
+  for (var i = 0; i < component.properties.numItems; i++) {
+    var prop = component.properties[i];
+    if (!prop) continue;
+    if (!targetName) return prop;
+    if (_normName(prop.displayName || "") === targetName) return prop;
+  }
+
+  return null;
+}
+
+function _findClipProperties(component, propertyName, propertyIndex) {
+  var props = [];
+  if (!component || !component.properties) return props;
+
+  var targetName = _normName(propertyName || "");
+  var index = parseInt(propertyIndex, 10);
+  if (!isNaN(index) && index >= 0 && index < component.properties.numItems) {
+    var indexedProperty = component.properties[index];
+    if (indexedProperty) {
+      var indexedName = "";
+      try { indexedName = String(indexedProperty.displayName || ""); } catch (e0) {}
+      if (!propertyName || _normName(indexedName) === targetName) {
+        props.push(indexedProperty);
+      }
+    }
+  }
+
+  for (var i = 0; i < component.properties.numItems; i++) {
+    var prop = component.properties[i];
+    if (!prop) continue;
+    var propName = "";
+    try { propName = String(prop.displayName || ""); } catch (e1) {}
+    if (targetName && _normName(propName) !== targetName) continue;
+    var alreadyIncluded = false;
+    for (var j = 0; j < props.length; j++) {
+      if (props[j] === prop) {
+        alreadyIncluded = true;
+        break;
+      }
+    }
+    if (!alreadyIncluded) props.push(prop);
+  }
+
+  return props;
 }
 
 // ─── Aplica keyframes a uma propriedade de efeito ─────────────────────────────

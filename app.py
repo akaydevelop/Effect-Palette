@@ -14,8 +14,16 @@ import os
 import time
 import ctypes
 from pathlib import Path
-from tkinter import messagebox
 from pynput import keyboard
+
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+    HAS_WATCHDOG = True
+except ImportError:
+    FileSystemEventHandler = object
+    Observer = None
+    HAS_WATCHDOG = False
 
 try:
     import pygetwindow as gw
@@ -48,6 +56,12 @@ SELECTION_FILE = EXT_DATA / "current_selection.json"
 
 # Intervalo de verificaÃ§Ã£o de mudanÃ§as no arquivo de efeitos (segundos)
 WATCH_INTERVAL = 3.0
+WATCHED_DATA_FILES = {
+    EFFECTS_FILE.name,
+    PRESETS_FILE.name,
+    PROJECT_ITEMS_FILE.name,
+    FAVORITES_FILE.name,
+}
 
 # Efeitos de fallback â€” usados quando o Premiere nÃ£o estÃ¡ aberto
 FALLBACK_EFFECTS = [
@@ -403,6 +417,15 @@ def send_command(effect: dict):
             "timestamp":         time.time(),
             "status":            "pending",
         }
+    elif effect.get("type") in {"transition_video", "transition_audio"}:
+        payload = {
+            "command":        "applyTransition",
+            "transitionName": effect["name"],
+            "transitionType": "audio" if effect.get("type") == "transition_audio" else "video",
+            "transitionPlacement": effect.get("transitionPlacement", "auto"),
+            "timestamp":      time.time(),
+            "status":         "pending",
+        }
     else:
         payload = {
             "command":   "applyEffect",
@@ -415,40 +438,6 @@ def send_command(effect: dict):
     BRIDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_safe(BRIDGE_FILE, json.dumps(payload, indent=2))
     print(f"[Bridge] Enviado: {effect['name']}")
-
-
-def preset_has_keyframes(effect: dict) -> bool:
-    if effect.get("type") != "preset":
-        return False
-
-    for fp in effect.get("filterPresets", []):
-        for param in fp.get("params", []):
-            if param.get("keyframes"):
-                return True
-    return False
-
-
-def load_current_selection() -> list:
-    if not SELECTION_FILE.exists():
-        return []
-
-    try:
-        with open(SELECTION_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def selection_has_infinite_warning_targets(selection: list) -> bool:
-    for item in selection:
-        if not isinstance(item, dict):
-            continue
-        if item.get("isAudio"):
-            continue
-        if item.get("isAdjustmentLike") or item.get("isImageLike"):
-            return True
-    return False
 
 
 def premiere_is_focused() -> bool:
@@ -478,6 +467,20 @@ def send_debug_command(command: str):
 
 # â”€â”€â”€ UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+class DataFilesChangeHandler(FileSystemEventHandler):
+    def __init__(self, palette):
+        self.palette = palette
+
+    def on_any_event(self, event):
+        if getattr(event, "is_directory", False):
+            return
+
+        for raw_path in (getattr(event, "src_path", ""), getattr(event, "dest_path", "")):
+            if raw_path and Path(raw_path).name in WATCHED_DATA_FILES:
+                self.palette.schedule_data_refresh()
+                return
+
+
 class EffectPalette:
     def __init__(self):
         self.loader = EffectsLoader()
@@ -488,8 +491,16 @@ class EffectPalette:
         self._min_window_width = 580
         self._max_window_width = 1180
         self._focus_primed = False
+        self._suspend_focus_out = False
         self._active_category = None
         self._watch_job = None
+        self._data_refresh_job = None
+        self._data_observer = None
+        self._search_job = None
+        self._suspend_search_trace = False
+        self._category_pills = {}
+        self._current_results = []
+        self._prepared_for_show = False
         self._build()
         self._start_file_watcher()
         self.root.after(0, self._prime_first_show)
@@ -591,55 +602,90 @@ class EffectPalette:
         self.entry.bind("<Up>",      lambda e: self._move_selection(-1))
         self.listbox.bind("<Return>",          lambda e: self._apply_selected())
         self.listbox.bind("<Double-Button-1>", lambda e: self._apply_selected())
-        self.root.bind("<FocusOut>", self._on_focus_out)
-
         W, H = self._window_width, self._window_height
         self.root.geometry(f"{W}x{H}")
         self._center_window(W, H)
-        self._refresh_list()
+        self._prepare_for_next_show(force=True)
 
     # â”€â”€ Pills de categoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _build_category_pills(self):
-        for w in self.cat_frame.winfo_children():
-            w.destroy()
-        for cat in ["Todos", "Video", "Audio", "Presets", "Projeto", "Favoritos"]:
-            active = (cat == "Todos" and self._active_category is None) or \
-                     (cat == self._active_category)
+        for cat in ["Todos", "Video", "Audio", "Transicoes", "Presets", "Projeto", "Favoritos"]:
+            if cat in self._category_pills:
+                continue
+
             pill = tk.Label(
                 self.cat_frame, text=cat,
-                bg=ACCENT if active else BG2,
-                fg=TEXT if active else TEXT_MUTED,
                 font=("Segoe UI", 8), padx=10, pady=3, cursor="hand2",
             )
             pill.pack(side="left", padx=3)
+            pill.bind("<Button-1>", lambda e, c=cat: self._on_category_click(c))
+            self._category_pills[cat] = pill
 
-            def on_click(e, c=cat):
-                self._active_category = None if c == "Todos" else c
-                self._build_category_pills()
-                self._refresh_list()
-            pill.bind("<Button-1>", on_click)
+        self._update_category_pills()
+
+    def _update_category_pills(self):
+        for cat, pill in self._category_pills.items():
+            active = (cat == "Todos" and self._active_category is None) or \
+                     (cat == self._active_category)
+            pill.config(
+                bg=ACCENT if active else BG2,
+                fg=TEXT if active else TEXT_MUTED,
+            )
+
+    def _on_category_click(self, cat: str):
+        new_category = None if cat == "Todos" else cat
+        if new_category == self._active_category:
+            return
+        self._active_category = new_category
+        self._prepared_for_show = False
+        self._update_category_pills()
+        self._refresh_list()
 
     # â”€â”€ Watcher de arquivo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _start_file_watcher(self):
+        EXT_DATA.mkdir(parents=True, exist_ok=True)
+
+        if HAS_WATCHDOG:
+            handler = DataFilesChangeHandler(self)
+            self._data_observer = Observer()
+            self._data_observer.schedule(handler, str(EXT_DATA), recursive=False)
+            self._data_observer.start()
+            return
+
         def watch():
             if self.loader.check_for_updates():
                 self.root.after(0, self._on_effects_updated)
             self._watch_job = self.root.after(int(WATCH_INTERVAL * 1000), watch)
         self._watch_job = self.root.after(int(WATCH_INTERVAL * 1000), watch)
 
+    def schedule_data_refresh(self):
+        if not self.root or not self.root.winfo_exists():
+            return
+        if self._data_refresh_job is not None:
+            self.root.after_cancel(self._data_refresh_job)
+        self._data_refresh_job = self.root.after(80, self._consume_data_refresh)
+
+    def _consume_data_refresh(self):
+        self._data_refresh_job = None
+        if self.loader.check_for_updates():
+            self._on_effects_updated()
+
     def _on_effects_updated(self):
         print(f"[Watcher] Lista atualizada â€” {self.loader.count} efeitos")
-        self._build_category_pills()
-        self._refresh_list()
-        self._update_conn_label()
-        self.status_label.config(text=f"[Atualizado] {self.loader.count} efeitos")
+        if self.is_open:
+            self._update_category_pills()
+            self._refresh_list()
+            self._update_conn_label()
+            self.status_label.config(text=f"[Atualizado] {self.loader.count} efeitos")
+        else:
+            self._prepared_for_show = False
 
     def _manual_refresh(self):
         send_debug_command("exportEffects")
         self.loader.check_for_updates()
-        self._build_category_pills()
+        self._update_category_pills()
         self._refresh_list()
         self._update_conn_label()
         self.status_label.config(text="Solicitando atualizacao ao Premiere...")
@@ -654,6 +700,8 @@ class EffectPalette:
             return self.loader.search(query, type_filter="video")
         elif cat == "Audio":
             return self.loader.search(query, type_filter="audio")
+        elif cat == "Transicoes":
+            return self.loader.search_types(query, {"transition_video", "transition_audio"})
         elif cat == "Presets":
             return self.loader.search(query, type_filter="preset")
         elif cat == "Projeto":
@@ -665,6 +713,7 @@ class EffectPalette:
 
     def _refresh_list(self):
         results = self._get_filtered_effects()
+        self._current_results = results
         self.listbox.delete(0, "end")
         labels = []
         for e in results:
@@ -672,14 +721,16 @@ class EffectPalette:
             is_project_item = e.get("type") == "project_item"
             is_generic_item = e.get("type") == "generic_item"
             is_favorite_item = e.get("type") == "favorite_item"
-            icon  = "[P] " if is_preset else ("[I] " if is_project_item else ("[F] " if (is_generic_item or is_favorite_item) else "  "))
+            is_transition = e.get("type") in {"transition_video", "transition_audio"}
+            icon  = "[P] " if is_preset else ("[I] " if is_project_item else ("[F] " if (is_generic_item or is_favorite_item) else ("[T] " if is_transition else "  ")))
             cat   = e.get("category", "")
             if is_preset and cat:
                 label = f"{icon}{cat} > {e['name']}"
             else:
                 label = f"{icon}{e['name']}" + (f"  [{cat}]" if cat and not is_preset else "")
             labels.append(label)
-            self.listbox.insert("end", label)
+        if labels:
+            self.listbox.insert("end", *labels)
         self._auto_size_to_labels(labels)
         if results:
             self.listbox.selection_set(0)
@@ -687,6 +738,15 @@ class EffectPalette:
         self.status_label.config(text=f"{len(results)} resultado(s)" if q else "")
 
     def _on_search_change(self, *_):
+        if self._suspend_search_trace:
+            return
+        self._prepared_for_show = False
+        if self._search_job is not None:
+            self.root.after_cancel(self._search_job)
+        self._search_job = self.root.after(25, self._refresh_from_search)
+
+    def _refresh_from_search(self):
+        self._search_job = None
         self._refresh_list()
 
     # â”€â”€ SeleÃ§Ã£o e aplicaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -699,7 +759,7 @@ class EffectPalette:
         self.listbox.see(idx)
 
     def _apply_selected(self):
-        results = self._get_filtered_effects()
+        results = self._current_results or self._get_filtered_effects()
         sel = self.listbox.curselection()
         if sel and sel[0] < len(results):
             effect = results[sel[0]]
@@ -711,27 +771,142 @@ class EffectPalette:
                 return
             effect = {"name": name, "category": "", "type": "video"}
 
-        if preset_has_keyframes(effect):
-            selection = load_current_selection()
-            if selection_has_infinite_warning_targets(selection):
-                proceed = messagebox.askyesno(
-                    "Aviso sobre keyframes",
-                    "Este preset possui keyframes e a selecao atual inclui uma Adjustment Layer ou uma imagem.\n\n"
-                    "No Premiere, presets animados nesses tipos de layer podem nao funcionar corretamente.\n\n"
-                    "Deseja aplicar mesmo assim?",
-                    parent=self.root,
-                )
-                if not proceed:
-                    self.status_label.config(text="Aplicacao cancelada")
-                    return
+        if effect.get("type") in {"transition_video", "transition_audio"}:
+            placement = self._choose_transition_placement()
+            if not placement:
+                self.status_label.config(text="Aplicacao cancelada")
+                return
+            effect = dict(effect)
+            effect["transitionPlacement"] = placement
 
         send_command(effect)
         if effect.get("type") in {"project_item", "generic_item", "favorite_item"}:
             self.status_label.config(text=f"[Inserido] {effect['name']}")
+        elif effect.get("type") in {"transition_video", "transition_audio"}:
+            self.status_label.config(text=f"[Transicao] {effect['name']}")
         else:
             self.status_label.config(text=f"[Aplicado] {effect['name']}")
         self.root.update()
         self.root.after(900, self.hide)
+
+    def _choose_transition_placement(self) -> str | None:
+        choice = {"value": None}
+        self._suspend_focus_out = True
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Posicao da transicao")
+        dialog.transient(self.root)
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+
+        body = tk.Frame(dialog, bg=BG, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="Onde voce quer aplicar a transicao?",
+            bg=BG,
+            fg=TEXT,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+
+        tk.Label(
+            body,
+            text="Automatico usa o comportamento atual do Premiere: entre dois clips quando houver corte, ou no fim do clip quando fizer sentido.",
+            bg=BG,
+            fg=TEXT_MUTED,
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=360,
+            anchor="w",
+        ).pack(fill="x", pady=(8, 14))
+
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill="x")
+
+        def choose(value: str):
+            choice["value"] = value
+            dialog.destroy()
+
+        button_widgets = []
+
+        def move_focus(delta: int):
+            if not button_widgets:
+                return "break"
+            focused = dialog.focus_get()
+            try:
+                current_index = button_widgets.index(focused)
+            except ValueError:
+                current_index = len(button_widgets) - 1
+            next_index = (current_index + delta) % len(button_widgets)
+            button_widgets[next_index].focus_force()
+            return "break"
+
+        start_btn = tk.Button(
+            buttons,
+            text="Inicio",
+            command=lambda: choose("start"),
+            bg=BG2,
+            fg=TEXT,
+            relief="flat",
+            padx=12,
+            pady=6,
+        )
+        start_btn.pack(side="left", padx=(0, 8))
+        button_widgets.append(start_btn)
+
+        end_btn = tk.Button(
+            buttons,
+            text="Fim",
+            command=lambda: choose("end"),
+            bg=BG2,
+            fg=TEXT,
+            relief="flat",
+            padx=12,
+            pady=6,
+        )
+        end_btn.pack(side="left", padx=(0, 8))
+        button_widgets.append(end_btn)
+
+        auto_btn = tk.Button(
+            buttons,
+            text="Automatico",
+            command=lambda: choose("auto"),
+            bg=ACCENT,
+            fg="#FFFFFF",
+            relief="flat",
+            padx=12,
+            pady=6,
+        )
+        auto_btn.pack(side="left")
+        button_widgets.append(auto_btn)
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Left>", lambda e: move_focus(-1))
+        dialog.bind("<Right>", lambda e: move_focus(1))
+        dialog.bind("<Tab>", lambda e: move_focus(1))
+        dialog.bind("<ISO_Left_Tab>", lambda e: move_focus(-1))
+        dialog.bind("<Shift-Tab>", lambda e: move_focus(-1))
+        dialog.bind("<Return>", lambda e: (dialog.focus_get().invoke() if dialog.focus_get() in button_widgets else auto_btn.invoke(), "break")[1])
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + max(20, (self._window_width - dialog.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + 70
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        auto_btn.focus_force()
+        try:
+            self.root.wait_window(dialog)
+        finally:
+            self._suspend_focus_out = False
+            try:
+                if self.is_open and self.root.winfo_exists():
+                    self._ensure_entry_focus()
+            except Exception:
+                pass
+        return choice["value"]
 
     # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -773,14 +948,39 @@ class EffectPalette:
         else:
             self.conn_label.config(text="* Offline (fallback)", fg=ORANGE)
 
-    def _on_focus_out(self, event):
-        if self.root.winfo_exists():
-            self.hide()
+    def _set_search_text(self, value: str, *, silent: bool = False):
+        if self.search_var.get() == value:
+            return
+        if silent:
+            self._suspend_search_trace = True
+        try:
+            self.search_var.set(value)
+        finally:
+            if silent:
+                self._suspend_search_trace = False
 
-    def _force_focus_attempt(self, attempt=0):
-        if not self.root.winfo_exists() or not self.is_open:
+    def _prepare_for_next_show(self, force: bool = False):
+        if not force and self._prepared_for_show:
             return
 
+        if self._search_job is not None:
+            self.root.after_cancel(self._search_job)
+            self._search_job = None
+
+        self._set_search_text("", silent=True)
+        self._active_category = None
+        self._update_category_pills()
+        self._refresh_list()
+        self.status_label.config(text="")
+        self._update_conn_label()
+        self._prepared_for_show = True
+
+    def _on_focus_out(self, event):
+        return
+
+    def _ensure_entry_focus(self):
+        if not self.root.winfo_exists() or not self.is_open:
+            return
         try:
             self.root.deiconify()
             self.root.update_idletasks()
@@ -789,6 +989,16 @@ class EffectPalette:
             self.root.focus_force()
             self.entry.focus_force()
             self.entry.icursor("end")
+            self.entry.selection_range(0, "end")
+        except Exception:
+            pass
+
+    def _force_focus_attempt(self, attempt=0):
+        if not self.root.winfo_exists() or not self.is_open:
+            return
+
+        try:
+            self._ensure_entry_focus()
         except Exception:
             pass
 
@@ -803,8 +1013,8 @@ class EffectPalette:
             except Exception:
                 pass
 
-        if attempt < 3:
-            self.root.after(60 + (attempt * 80), lambda a=attempt + 1: self._force_focus_attempt(a))
+        if attempt < 6:
+            self.root.after(80 + (attempt * 110), lambda a=attempt + 1: self._force_focus_attempt(a))
 
     def _restore_borderless(self):
         if not self.root.winfo_exists() or not self.is_open:
@@ -813,8 +1023,7 @@ class EffectPalette:
             self.root.overrideredirect(True)
             self.root.attributes("-topmost", True)
             self.root.lift()
-            self.entry.focus_force()
-            self.entry.icursor("end")
+            self._ensure_entry_focus()
         except Exception:
             pass
 
@@ -828,9 +1037,7 @@ class EffectPalette:
             self.root.deiconify()
             self.root.update_idletasks()
             self.root.lift()
-            self.root.focus_force()
-            self.entry.focus_force()
-            self.entry.icursor("end")
+            self._ensure_entry_focus()
             self.root.update()
         except Exception:
             pass
@@ -839,7 +1046,6 @@ class EffectPalette:
                 self.root.withdraw()
                 self.root.overrideredirect(True)
                 self.root.attributes("-alpha", 0.97)
-                self.root.bind("<FocusOut>", self._on_focus_out)
             except Exception:
                 pass
             self._focus_primed = True
@@ -848,15 +1054,9 @@ class EffectPalette:
         if self.is_open:
             return
         self.is_open = True
-        self.search_var.set("")
-        self._active_category = None
-        self._build_category_pills()
-        self._refresh_list()
-        self.status_label.config(text="")
-        self._update_conn_label()
+        self._prepare_for_next_show()
 
-        # Desativa FocusOut temporariamente para nÃ£o fechar durante a abertura
-        self.root.unbind("<FocusOut>")
+        self._suspend_focus_out = True
 
         try:
             self.root.overrideredirect(False)
@@ -866,15 +1066,44 @@ class EffectPalette:
         self.root.update_idletasks()
         self._force_focus_attempt(0)
         self.root.after(120, self._restore_borderless)
+        self.root.after(240, self._ensure_entry_focus)
+        self.root.after(420, self._ensure_entry_focus)
+        self.root.after(700, self._ensure_entry_focus)
+        self.root.after(1000, self._ensure_entry_focus)
 
-        # Reativa FocusOut apÃ³s a janela estar estÃ¡vel
-        self.root.after(500, lambda: self.root.bind("<FocusOut>", self._on_focus_out))
+        self.root.after(700, self._finish_show_focus)
+
+    def _finish_show_focus(self):
+        try:
+            if self.root.winfo_exists():
+                self._ensure_entry_focus()
+        finally:
+            self._suspend_focus_out = False
 
     def hide(self):
         if not self.is_open:
             return
         self.is_open = False
         self.root.withdraw()
+        self.root.after_idle(self._prepare_for_next_show)
+
+    def shutdown(self):
+        for job_name in ("_watch_job", "_data_refresh_job", "_search_job"):
+            job = getattr(self, job_name, None)
+            if job is not None and self.root.winfo_exists():
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_name, None)
+
+        if self._data_observer is not None:
+            try:
+                self._data_observer.stop()
+                self._data_observer.join(timeout=1.0)
+            except Exception:
+                pass
+            self._data_observer = None
 
     def toggle(self):
         self.hide() if self.is_open else self.show()
@@ -1128,6 +1357,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[App] Encerrando...")
     finally:
+        palette.shutdown()
         hotkey.stop()
 
 
