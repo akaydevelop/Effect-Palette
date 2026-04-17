@@ -18,6 +18,15 @@ from tkinter import messagebox
 from pynput import keyboard
 
 try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+    HAS_WATCHDOG = True
+except ImportError:
+    FileSystemEventHandler = object
+    Observer = None
+    HAS_WATCHDOG = False
+
+try:
     import pygetwindow as gw
     HAS_PYGETWINDOW = True
 except ImportError:
@@ -46,8 +55,13 @@ FAVORITES_FILE = EXT_DATA / "premiere_favorites.json"
 BRIDGE_FILE  = EXT_DATA / "premiere_cmd.json"
 SELECTION_FILE = EXT_DATA / "current_selection.json"
 
-# Intervalo de verificaÃ§Ã£o de mudanÃ§as no arquivo de efeitos (segundos)
 WATCH_INTERVAL = 3.0
+WATCHED_DATA_FILES = {
+    EFFECTS_FILE.name,
+    PRESETS_FILE.name,
+    PROJECT_ITEMS_FILE.name,
+    FAVORITES_FILE.name,
+}
 
 # Efeitos de fallback â€” usados quando o Premiere nÃ£o estÃ¡ aberto
 FALLBACK_EFFECTS = [
@@ -476,6 +490,20 @@ def send_debug_command(command: str):
     print(f"[Bridge] Comando enviado: {command}")
 
 
+class DataFilesChangeHandler(FileSystemEventHandler):
+    def __init__(self, palette):
+        self.palette = palette
+
+    def on_any_event(self, event):
+        if getattr(event, "is_directory", False):
+            return
+
+        for raw_path in (getattr(event, "src_path", ""), getattr(event, "dest_path", "")):
+            if raw_path and Path(raw_path).name in WATCHED_DATA_FILES:
+                self.palette.schedule_data_refresh()
+                return
+
+
 # â”€â”€â”€ UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class EffectPalette:
@@ -488,8 +516,19 @@ class EffectPalette:
         self._min_window_width = 580
         self._max_window_width = 1180
         self._focus_primed = False
+        self._has_shown_once = False
+        self._prime_finish_job = None
         self._active_category = None
         self._watch_job = None
+        self._data_refresh_job = None
+        self._data_observer = None
+        self._search_job = None
+        self._focus_out_job = None
+        self._focus_out_grace_until = 0.0
+        self._suspend_search_trace = False
+        self._category_pills = {}
+        self._current_results = []
+        self._prepared_for_show = False
         self._build()
         self._start_file_watcher()
         self.root.after(0, self._prime_first_show)
@@ -591,57 +630,98 @@ class EffectPalette:
         self.entry.bind("<Up>",      lambda e: self._move_selection(-1))
         self.listbox.bind("<Return>",          lambda e: self._apply_selected())
         self.listbox.bind("<Double-Button-1>", lambda e: self._apply_selected())
+        self.root.bind("<FocusIn>", self._on_focus_in)
         self.root.bind("<FocusOut>", self._on_focus_out)
 
         W, H = self._window_width, self._window_height
         self.root.geometry(f"{W}x{H}")
         self._center_window(W, H)
-        self._refresh_list()
+        self._prepare_for_next_show(force=True)
 
     # â”€â”€ Pills de categoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _build_category_pills(self):
-        for w in self.cat_frame.winfo_children():
-            w.destroy()
         for cat in ["Todos", "Video", "Audio", "Presets", "Projeto", "Favoritos"]:
-            active = (cat == "Todos" and self._active_category is None) or \
-                     (cat == self._active_category)
+            if cat in self._category_pills:
+                continue
+
             pill = tk.Label(
                 self.cat_frame, text=cat,
-                bg=ACCENT if active else BG2,
-                fg=TEXT if active else TEXT_MUTED,
                 font=("Segoe UI", 8), padx=10, pady=3, cursor="hand2",
             )
             pill.pack(side="left", padx=3)
+            pill.bind("<Button-1>", lambda e, c=cat: self._on_category_click(c))
+            self._category_pills[cat] = pill
 
-            def on_click(e, c=cat):
-                self._active_category = None if c == "Todos" else c
-                self._build_category_pills()
-                self._refresh_list()
-            pill.bind("<Button-1>", on_click)
+        self._update_category_pills()
+
+    def _update_category_pills(self):
+        for cat, pill in self._category_pills.items():
+            active = (cat == "Todos" and self._active_category is None) or \
+                     (cat == self._active_category)
+            pill.config(
+                bg=ACCENT if active else BG2,
+                fg=TEXT if active else TEXT_MUTED,
+            )
+
+    def _on_category_click(self, cat: str):
+        new_category = None if cat == "Todos" else cat
+        if new_category == self._active_category:
+            return
+        self._active_category = new_category
+        self._prepared_for_show = False
+        self._update_category_pills()
+        self._refresh_list()
 
     # â”€â”€ Watcher de arquivo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _start_file_watcher(self):
+        EXT_DATA.mkdir(parents=True, exist_ok=True)
+
+        if HAS_WATCHDOG:
+            handler = DataFilesChangeHandler(self)
+            self._data_observer = Observer()
+            self._data_observer.schedule(handler, str(EXT_DATA), recursive=False)
+            self._data_observer.start()
+            return
+
         def watch():
             if self.loader.check_for_updates():
                 self.root.after(0, self._on_effects_updated)
             self._watch_job = self.root.after(int(WATCH_INTERVAL * 1000), watch)
         self._watch_job = self.root.after(int(WATCH_INTERVAL * 1000), watch)
 
+    def schedule_data_refresh(self):
+        if not self.root or not self.root.winfo_exists():
+            return
+        if self._data_refresh_job is not None:
+            self.root.after_cancel(self._data_refresh_job)
+        self._data_refresh_job = self.root.after(80, self._consume_data_refresh)
+
+    def _consume_data_refresh(self):
+        self._data_refresh_job = None
+        if self.loader.check_for_updates():
+            self._on_effects_updated()
+
     def _on_effects_updated(self):
         print(f"[Watcher] Lista atualizada â€” {self.loader.count} efeitos")
-        self._build_category_pills()
-        self._refresh_list()
-        self._update_conn_label()
-        self.status_label.config(text=f"[Atualizado] {self.loader.count} efeitos")
+        if self.is_open:
+            self._update_category_pills()
+            self._refresh_list()
+            self._update_conn_label()
+            self.status_label.config(text=f"[Atualizado] {self.loader.count} efeitos")
+        else:
+            self._prepare_for_next_show(force=True)
 
     def _manual_refresh(self):
         send_debug_command("exportEffects")
         self.loader.check_for_updates()
-        self._build_category_pills()
-        self._refresh_list()
-        self._update_conn_label()
+        if self.is_open:
+            self._update_category_pills()
+            self._refresh_list()
+            self._update_conn_label()
+        else:
+            self._prepare_for_next_show(force=True)
         self.status_label.config(text="Solicitando atualizacao ao Premiere...")
 
     # â”€â”€ Lista e busca â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -665,6 +745,7 @@ class EffectPalette:
 
     def _refresh_list(self):
         results = self._get_filtered_effects()
+        self._current_results = results
         self.listbox.delete(0, "end")
         labels = []
         for e in results:
@@ -679,7 +760,8 @@ class EffectPalette:
             else:
                 label = f"{icon}{e['name']}" + (f"  [{cat}]" if cat and not is_preset else "")
             labels.append(label)
-            self.listbox.insert("end", label)
+        if labels:
+            self.listbox.insert("end", *labels)
         self._auto_size_to_labels(labels)
         if results:
             self.listbox.selection_set(0)
@@ -687,6 +769,15 @@ class EffectPalette:
         self.status_label.config(text=f"{len(results)} resultado(s)" if q else "")
 
     def _on_search_change(self, *_):
+        if self._suspend_search_trace:
+            return
+        self._prepared_for_show = False
+        if self._search_job is not None:
+            self.root.after_cancel(self._search_job)
+        self._search_job = self.root.after(25, self._refresh_from_search)
+
+    def _refresh_from_search(self):
+        self._search_job = None
         self._refresh_list()
 
     # â”€â”€ SeleÃ§Ã£o e aplicaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -699,7 +790,7 @@ class EffectPalette:
         self.listbox.see(idx)
 
     def _apply_selected(self):
-        results = self._get_filtered_effects()
+        results = self._current_results
         sel = self.listbox.curselection()
         if sel and sel[0] < len(results):
             effect = results[sel[0]]
@@ -773,11 +864,101 @@ class EffectPalette:
         else:
             self.conn_label.config(text="* Offline (fallback)", fg=ORANGE)
 
-    def _on_focus_out(self, event):
-        if self.root.winfo_exists():
-            self.hide()
+    def _set_search_text(self, value: str, *, silent: bool = False):
+        if self.search_var.get() == value:
+            return
+        if silent:
+            self._suspend_search_trace = True
+        try:
+            self.search_var.set(value)
+        finally:
+            if silent:
+                self._suspend_search_trace = False
 
-    def _force_focus_attempt(self, attempt=0):
+    def _prepare_for_next_show(self, force: bool = False):
+        if not force and self._prepared_for_show:
+            return
+
+        if self._search_job is not None:
+            self.root.after_cancel(self._search_job)
+            self._search_job = None
+
+        self._set_search_text("", silent=True)
+        self._active_category = None
+        self._update_category_pills()
+        self._refresh_list()
+        self.status_label.config(text="")
+        self._update_conn_label()
+        self._prepared_for_show = True
+
+    def _cancel_focus_out_job(self):
+        if self._focus_out_job is None:
+            return
+        try:
+            self.root.after_cancel(self._focus_out_job)
+        except Exception:
+            pass
+        self._focus_out_job = None
+
+    def _on_focus_in(self, event):
+        self._cancel_focus_out_job()
+
+    def _on_focus_out(self, event):
+        if not self.root.winfo_exists() or not self.is_open:
+            return
+        if time.monotonic() < self._focus_out_grace_until:
+            return
+        self._cancel_focus_out_job()
+        self._focus_out_job = self.root.after(140, self._hide_if_focus_lost)
+
+    def _pointer_inside_window(self) -> bool:
+        if not self.root.winfo_exists():
+            return False
+        try:
+            px, py = self.root.winfo_pointerxy()
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+            rh = self.root.winfo_height()
+            return rx <= px < (rx + rw) and ry <= py < (ry + rh)
+        except Exception:
+            return False
+
+    def _hide_if_focus_lost(self):
+        self._focus_out_job = None
+        if not self.root.winfo_exists() or not self.is_open:
+            return
+        if time.monotonic() < self._focus_out_grace_until:
+            return
+
+        try:
+            focused = self.root.focus_get()
+            if focused is not None and focused.winfo_toplevel() == self.root:
+                return
+        except Exception:
+            pass
+
+        if self._pointer_inside_window():
+            self._focus_out_grace_until = time.monotonic() + 0.25
+            self._force_focus_attempt(0)
+            return
+
+        self.hide()
+
+    def _activate_window_native(self):
+        if USER32 is None:
+            return
+        try:
+            hwnd = int(self.root.winfo_id())
+            USER32.ShowWindow(hwnd, SW_SHOWNORMAL)
+            USER32.BringWindowToTop(hwnd)
+            USER32.SetForegroundWindow(hwnd)
+            USER32.SetActiveWindow(hwnd)
+            USER32.SetFocus(hwnd)
+        except Exception:
+            pass
+
+    def _force_focus_attempt(self, attempt=0, max_attempts=5):
         if not self.root.winfo_exists() or not self.is_open:
             return
 
@@ -792,89 +973,120 @@ class EffectPalette:
         except Exception:
             pass
 
-        if USER32 is not None:
-            try:
-                hwnd = int(self.root.winfo_id())
-                USER32.ShowWindow(hwnd, SW_RESTORE if attempt == 0 else SW_SHOWNORMAL)
-                USER32.BringWindowToTop(hwnd)
-                USER32.SetForegroundWindow(hwnd)
-                USER32.SetActiveWindow(hwnd)
-                USER32.SetFocus(hwnd)
-            except Exception:
-                pass
+        self._activate_window_native()
 
-        if attempt < 3:
-            self.root.after(60 + (attempt * 80), lambda a=attempt + 1: self._force_focus_attempt(a))
+        if attempt < max_attempts:
+            self.root.after(35 + (attempt * 35), lambda a=attempt + 1, m=max_attempts: self._force_focus_attempt(a, m))
 
-    def _restore_borderless(self):
-        if not self.root.winfo_exists() or not self.is_open:
+    def _finish_focus_prime(self):
+        self._prime_finish_job = None
+        if self.is_open or not self.root.winfo_exists():
             return
         try:
-            self.root.overrideredirect(True)
-            self.root.attributes("-topmost", True)
-            self.root.lift()
-            self.entry.focus_force()
-            self.entry.icursor("end")
+            self.root.withdraw()
+            self.root.attributes("-alpha", 0.97)
+            self.root.bind("<FocusOut>", self._on_focus_out)
         except Exception:
             pass
+        self._focus_primed = True
 
     def _prime_first_show(self):
         if self._focus_primed or not self.root.winfo_exists():
             return
         try:
             self.root.unbind("<FocusOut>")
-            self.root.attributes("-alpha", 0.0)
-            self.root.overrideredirect(False)
+            self.root.attributes("-alpha", 0.01)
             self.root.deiconify()
             self.root.update_idletasks()
             self.root.lift()
-            self.root.focus_force()
-            self.entry.focus_force()
-            self.entry.icursor("end")
+            self._activate_window_native()
             self.root.update()
         except Exception:
             pass
-        finally:
+        if self._prime_finish_job is not None:
             try:
-                self.root.withdraw()
-                self.root.overrideredirect(True)
-                self.root.attributes("-alpha", 0.97)
-                self.root.bind("<FocusOut>", self._on_focus_out)
+                self.root.after_cancel(self._prime_finish_job)
             except Exception:
                 pass
-            self._focus_primed = True
+        self._prime_finish_job = self.root.after(140, self._finish_focus_prime)
 
     def show(self):
         if self.is_open:
             return
+        first_show = not self._has_shown_once
         self.is_open = True
-        self.search_var.set("")
-        self._active_category = None
-        self._build_category_pills()
-        self._refresh_list()
-        self.status_label.config(text="")
-        self._update_conn_label()
+        self._prepare_for_next_show()
+        self._focus_out_grace_until = time.monotonic() + (1.8 if first_show else 1.2)
+        self._cancel_focus_out_job()
+
+        if self._prime_finish_job is not None:
+            try:
+                self.root.after_cancel(self._prime_finish_job)
+            except Exception:
+                pass
+            self._prime_finish_job = None
 
         # Desativa FocusOut temporariamente para nÃ£o fechar durante a abertura
         self.root.unbind("<FocusOut>")
 
-        try:
-            self.root.overrideredirect(False)
-        except Exception:
-            pass
+        self.root.attributes("-alpha", 0.97)
         self.root.deiconify()
         self.root.update_idletasks()
-        self._force_focus_attempt(0)
-        self.root.after(120, self._restore_borderless)
+        focus_attempts = 8 if first_show else 5
+        self.root.after_idle(lambda m=focus_attempts: self._force_focus_attempt(0, m))
+        if first_show:
+            self.root.after(160, lambda m=focus_attempts: self._force_focus_attempt(0, m))
 
         # Reativa FocusOut apÃ³s a janela estar estÃ¡vel
-        self.root.after(500, lambda: self.root.bind("<FocusOut>", self._on_focus_out))
+        self.root.after(1200 if first_show else 700, lambda: self.root.bind("<FocusOut>", self._on_focus_out))
+        self._has_shown_once = True
 
     def hide(self):
         if not self.is_open:
             return
         self.is_open = False
+        self._cancel_focus_out_job()
         self.root.withdraw()
+        self.root.after_idle(self._prepare_for_next_show)
+
+    def shutdown(self):
+        if self._watch_job is not None and self.root.winfo_exists():
+            try:
+                self.root.after_cancel(self._watch_job)
+            except Exception:
+                pass
+            self._watch_job = None
+
+        if self._data_refresh_job is not None and self.root.winfo_exists():
+            try:
+                self.root.after_cancel(self._data_refresh_job)
+            except Exception:
+                pass
+            self._data_refresh_job = None
+
+        if self._search_job is not None and self.root.winfo_exists():
+            try:
+                self.root.after_cancel(self._search_job)
+            except Exception:
+                pass
+            self._search_job = None
+
+        self._cancel_focus_out_job()
+
+        if self._prime_finish_job is not None and self.root.winfo_exists():
+            try:
+                self.root.after_cancel(self._prime_finish_job)
+            except Exception:
+                pass
+            self._prime_finish_job = None
+
+        if self._data_observer is not None:
+            try:
+                self._data_observer.stop()
+                self._data_observer.join(timeout=1.0)
+            except Exception:
+                pass
+            self._data_observer = None
 
     def toggle(self):
         self.hide() if self.is_open else self.show()
@@ -1129,6 +1341,7 @@ def main():
         print("\n[App] Encerrando...")
     finally:
         hotkey.stop()
+        palette.shutdown()
 
 
 if __name__ == "__main__":

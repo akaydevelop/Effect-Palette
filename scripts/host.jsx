@@ -812,6 +812,48 @@ function _selectionVideoSpan(selectionJSON) {
   };
 }
 
+function _selectedVideoPlacement(selectionJSON) {
+  var selection = [];
+  var minStart = null;
+  var maxEnd = null;
+  var count = 0;
+  var minTrack = null;
+  var maxTrack = null;
+
+  try {
+    selection = selectionJSON ? JSON.parse(selectionJSON) : [];
+  } catch (e0) {
+    selection = [];
+  }
+
+  for (var i = 0; i < selection.length; i++) {
+    var item = selection[i];
+    if (!item || item.isAudio) continue;
+
+    var startTicks = Number(item.startTicks);
+    var endTicks = Number(item.endTicks);
+    var trackIndex = Number(item.trackIndex);
+    if (isNaN(startTicks) || isNaN(endTicks) || endTicks <= startTicks) continue;
+    if (isNaN(trackIndex) || trackIndex < 0) continue;
+
+    if (minStart === null || startTicks < minStart) minStart = startTicks;
+    if (maxEnd === null || endTicks > maxEnd) maxEnd = endTicks;
+    if (minTrack === null || trackIndex < minTrack) minTrack = trackIndex;
+    if (maxTrack === null || trackIndex > maxTrack) maxTrack = trackIndex;
+    count++;
+  }
+
+  if (minStart === null || maxEnd === null || count < 1) return null;
+  return {
+    startTicks: minStart,
+    endTicks: maxEnd,
+    count: count,
+    minTrackIndex: minTrack,
+    maxTrackIndex: maxTrack,
+    preferredAboveTrackIndex: (maxTrack === null ? 0 : maxTrack + 1)
+  };
+}
+
 function _timeFromTicks(ticks) {
   var t = new Time();
   var numericTicks = Math.max(0, Math.round(Number(ticks) || 0));
@@ -838,6 +880,17 @@ function _findClipByStartOnTrack(track, startTicks, clipName) {
   } catch (e) {}
 
   return null;
+}
+
+function _selectTimelineClip(clip) {
+  if (!clip || typeof clip.setSelected !== "function") return;
+  try {
+    clip.setSelected(true, true);
+  } catch (e1) {
+    try {
+      clip.setSelected(1, 1);
+    } catch (e2) {}
+  }
 }
 
 function _extensionRootFsPath() {
@@ -1340,6 +1393,10 @@ function _projectItemShouldSpanSelection(projectItem, explicitGenericKey) {
   return /adjustment layer|bars and tone|black video|color matte|transparent video|universal counting leader/i.test(name);
 }
 
+function _projectItemShouldInsertAboveSelection(projectItem, explicitGenericKey) {
+  return _projectItemShouldSpanSelection(projectItem, explicitGenericKey);
+}
+
 function _insertResolvedProjectItem(sequence, projectItem, selectionJSON, explicitGenericKey) {
   if (!sequence || !projectItem) return "not_found";
 
@@ -1350,7 +1407,14 @@ function _insertResolvedProjectItem(sequence, projectItem, selectionJSON, explic
   var playheadTicks = playhead.ticks !== undefined ? playhead.ticks : playhead;
   var insertionTicks = Number(playheadTicks) || 0;
   var mediaKinds = _projectItemMediaKinds(projectItem);
-  var selectionSpan = _projectItemShouldSpanSelection(projectItem, explicitGenericKey) ? _selectionVideoSpan(selectionJSON) : null;
+  var selectedVideoPlacement = _projectItemShouldSpanSelection(projectItem, explicitGenericKey)
+    ? _selectedVideoPlacement(selectionJSON)
+    : null;
+  var selectionSpan = selectedVideoPlacement ? {
+    startTicks: selectedVideoPlacement.startTicks,
+    endTicks: selectedVideoPlacement.endTicks,
+    count: selectedVideoPlacement.count
+  } : null;
   var result = null;
   var timeSeconds = String(playhead.seconds);
   var timeTicks = String(playheadTicks);
@@ -1362,6 +1426,9 @@ function _insertResolvedProjectItem(sequence, projectItem, selectionJSON, explic
   }
 
   if (mediaKinds.hasVideo) {
+    if (selectedVideoPlacement && _projectItemShouldInsertAboveSelection(projectItem, explicitGenericKey)) {
+      tracks.videoTrackIndex = Math.max(0, Number(selectedVideoPlacement.preferredAboveTrackIndex) || 0);
+    }
     tracks.videoTrackIndex = selectionSpan
       ? _findAvailableVideoTrackInRange(sequence, tracks.videoTrackIndex, selectionSpan.startTicks, selectionSpan.endTicks)
       : _findAvailableVideoTrackAtTicks(sequence, tracks.videoTrackIndex, insertionTicks);
@@ -1401,6 +1468,13 @@ function _insertResolvedProjectItem(sequence, projectItem, selectionJSON, explic
         insertedClip.end = _timeFromTicks(selectionSpan.endTicks);
       } catch (trimErr) {}
     }
+    _selectTimelineClip(insertedClip);
+  } else if (mediaKinds.hasVideo && sequence.videoTracks[tracks.videoTrackIndex]) {
+    _selectTimelineClip(_findClipByStartOnTrack(
+      sequence.videoTracks[tracks.videoTrackIndex],
+      insertionTicks,
+      projectItem.name
+    ));
   }
 
   if (result === false) return "Error: overwriteClip retornou false.";
