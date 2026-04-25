@@ -19,6 +19,7 @@ const PRESETS_FILE  = path.join(DATA_DIR, "premiere_presets.json");
 const PROJECT_ITEMS_FILE = path.join(DATA_DIR, "premiere_project_items.json");
 const FAVORITES_FILE = path.join(DATA_DIR, "premiere_favorites.json");
 const SEQUENCES_FILE = path.join(DATA_DIR, "premiere_sequences.json");
+const HOST_INFO_FILE = path.join(DATA_DIR, "premiere_host_info.json");
 const CMD_FILE      = path.join(DATA_DIR, "premiere_cmd.json");
 const LOG_FILE      = path.join(DATA_DIR, "premiere_diagnose.txt");
 const WORKER_LOG_FILE = path.join(DATA_DIR, "worker.log");
@@ -154,6 +155,46 @@ function evalHostScript(script, callback) {
 }
 
 // ─── 1. Exportar efeitos ──────────────────────────────────────────────────────
+
+function exportHostInfo(reason) {
+  log("Exportando informacoes do host" + (reason ? " (" + reason + ")" : "") + "...");
+
+  const hostEnv = cs.getHostEnvironment ? cs.getHostEnvironment() : {};
+  evalHostScript("getPremiereHostInfoSafe()", function(result) {
+    let hostInfo = {};
+    if (result && result !== "EvalScript error." && result.indexOf("Error") !== 0) {
+      try {
+        hostInfo = JSON.parse(result);
+      } catch (e) {
+        hostInfo = { parse_error: e.message, raw: String(result || "") };
+      }
+    } else {
+      hostInfo = { error: String(result || "") };
+    }
+
+    const payload = {
+      version: 1,
+      exported_at: Date.now() / 1000,
+      reason: reason || "",
+      cep_host_environment: {
+        app_id: hostEnv.appId || "",
+        app_name: hostEnv.appName || "",
+        app_version: hostEnv.appVersion || "",
+        app_locale: hostEnv.appLocale || "",
+        app_ui_locale: hostEnv.appUILocale || "",
+        is_app_online: !!hostEnv.isAppOnline,
+      },
+      host: hostInfo,
+    };
+
+    try {
+      writeSafe(HOST_INFO_FILE, JSON.stringify(payload, null, 2));
+      log("✓ Informacoes do host exportadas", "ok");
+    } catch (e) {
+      log("Erro ao exportar informacoes do host: " + e.message, "err");
+    }
+  });
+}
 
 function exportEffects() {
   setStatus("Exportando efeitos...", "waiting");
@@ -607,6 +648,8 @@ function startPolling() {
 
           if (cmd.command === "applyEffect") {
             applyEffect(cmd);
+          } else if (cmd.command === "applyTransition") {
+            applyTransition(cmd);
           } else if (cmd.command === "applyPreset") {
             applyPreset(cmd);
           } else if (cmd.command === "insertProjectItem") {
@@ -617,6 +660,7 @@ function startPolling() {
             insertFavoriteItem(cmd);
           } else if (cmd.command === "exportEffects") {
             markCmdStatus("processing");
+            exportHostInfo("manual");
             exportEffects();
             exportPresets();
             exportProjectItems("manual");
@@ -722,6 +766,46 @@ function applyPreset(cmd) {
   });
 }
 
+// ─── 5b. Aplicar transição ───────────────────────────────────────────────────
+
+function applyTransition(cmd) {
+  const transitionName = cmd.transitionName;
+  const transitionType = cmd.transitionType || "video";
+  const transitionPlacement = cmd.transitionPlacement || "auto";
+
+  log("→ Aplicando transição: " + transitionName, "apply");
+  setStatus("Aplicando transição: " + transitionName, "waiting");
+  markCmdStatus("processing");
+
+  const script = 'applyTransitionWithSelection(' +
+    JSON.stringify(transitionName) + ', ' +
+    JSON.stringify(transitionType) + ', ' +
+    JSON.stringify(transitionPlacement) + ', ' +
+    JSON.stringify(lastSelectionJSON) + ')';
+
+  evalHostScript(script, function(result) {
+    if (result === "ok") {
+      appliedCount++;
+      updateCount("count-applied", appliedCount);
+      setStatus("Conectado", "ok");
+      log("✓ Transição aplicada: " + transitionName, "ok");
+      markCmdStatus("done");
+    } else if (result === "no_selection") {
+      setStatus("Sem clipes compatíveis", "waiting");
+      log("⚠ Nenhum clipe compatível selecionado para a transição", "warn");
+      markCmdStatus("error_no_selection");
+    } else if (result === "not_found") {
+      setStatus("Transição não encontrada", "waiting");
+      log("⚠ Transição não encontrada: " + transitionName, "warn");
+      markCmdStatus("error_not_found");
+    } else {
+      setStatus("Erro ao aplicar transição", "error");
+      log("Erro: " + result, "err");
+      markCmdStatus("error");
+    }
+  });
+}
+
 // ——— 6. Inserir item do projeto ————————————————————————————————————————————————
 
 function insertProjectItem(cmd) {
@@ -760,6 +844,10 @@ function insertProjectItem(cmd) {
       setStatus("Item não encontrado", "waiting");
       log("⚠ Item do projeto não encontrado: " + itemName, "warn");
       markCmdStatus("error_not_found");
+    } else if (result === "not_inserted") {
+      setStatus("Item não entrou na timeline", "waiting");
+      log("⚠ Premiere localizou o item, mas não conseguiu inseri-lo na timeline: " + itemName, "warn");
+      markCmdStatus("error_not_inserted");
     } else if (result === "no_sequence") {
       setStatus("Sem sequência ativa", "waiting");
       log("⚠ Nenhuma sequência ativa para inserir item", "warn");
@@ -818,6 +906,10 @@ function insertGenericItem(cmd) {
       setStatus("Item não encontrado", "waiting");
       log("⚠ Item genérico não encontrado após criação/importação: " + itemName, "warn");
       markCmdStatus("error_not_found");
+    } else if (result === "not_inserted") {
+      setStatus("Item não entrou na timeline", "waiting");
+      log("⚠ Premiere criou/localizou o item, mas não conseguiu inseri-lo na timeline: " + itemName, "warn");
+      markCmdStatus("error_not_inserted");
     } else if (result === "no_sequence") {
       setStatus("Sem sequência ativa", "waiting");
       log("⚠ Nenhuma sequência ativa para inserir item", "warn");
@@ -873,6 +965,10 @@ function insertFavoriteItem(cmd) {
       setStatus("Favorito não encontrado", "waiting");
       log("⚠ Favorito não encontrado: " + itemName, "warn");
       markCmdStatus("error_not_found");
+    } else if (result === "not_inserted") {
+      setStatus("Favorito não entrou na timeline", "waiting");
+      log("⚠ Premiere importou/localizou o favorito, mas não conseguiu inseri-lo na timeline: " + itemName, "warn");
+      markCmdStatus("error_not_inserted");
     } else if (result === "no_sequence") {
       setStatus("Sem sequência ativa", "waiting");
       log("⚠ Nenhuma sequência ativa para inserir favorito", "warn");
@@ -920,7 +1016,7 @@ function runDiagnose() {
 
 function init() {
   trimWorkerLogOnStartup();
-  log("Effect Palette " + (IS_DEBUG_PANEL ? "debug panel" : "worker") + " carregado");
+  log("FX.palette " + (IS_DEBUG_PANEL ? "debug panel" : "worker") + " carregado");
 
   try {
     if (fs.existsSync(CMD_FILE)) {
@@ -930,6 +1026,7 @@ function init() {
   } catch (e) {}
 
   setTimeout(function() {
+    exportHostInfo("startup");
     exportEffects();
     exportPresets();
     exportProjectItems("startup");

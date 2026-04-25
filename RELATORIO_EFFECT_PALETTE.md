@@ -1,8 +1,8 @@
-# Effect Palette - Relatorio Atual do Projeto
+# FX.palette - Relatorio Atual do Projeto
 
 ## Visao Geral
 
-O **Effect Palette** e uma paleta flutuante para Adobe Premiere Pro, controlada por um app Python, que permite buscar e aplicar:
+O **FX.palette** e uma paleta flutuante para Adobe Premiere Pro, controlada por um app Python, que permite buscar e aplicar:
 
 - efeitos de video
 - efeitos de audio
@@ -25,13 +25,17 @@ O objetivo atual nao e mudar a UX principal. A paleta Python continua sendo o co
 ### Componentes
 
 ```text
-Effect Palette
+FX.palette
 |- app.py
 |- bridge.js
 |- scripts/host.jsx
 |- CSXS/manifest.xml
 |- worker.html
 |- EffectPalette.bat
+|- EffectPalette.pyw
+|- beta_report.py
+|- installer/
+|- packaging/
 |- data/
 |- template_project/
 ```
@@ -40,6 +44,15 @@ Effect Palette
 
 - [app.py](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/app.py)
   App Python com a paleta flutuante, hotkeys globais, watcher de arquivos e janela de debug.
+
+- [EffectPalette.pyw](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/EffectPalette.pyw)
+  Launcher para iniciar o app com `pythonw.exe`, sem janela de prompt no uso normal.
+
+- [beta_report.py](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/beta_report.py)
+  Coleta local de logs, eventos leves, informacoes do PC/Premiere e feedback para a beta fechada.
+
+- [packaging](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging)
+  Estrutura para empacotar o app com PyInstaller e gerar instalador `.exe` com Inno Setup.
 
 - [bridge.js](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/bridge.js)
   Worker CEP headless que faz polling, exporta dados do Premiere, le a fila de comandos e chama o host ExtendScript.
@@ -83,7 +96,9 @@ O app Python escreve comandos em `premiere_cmd.json`, o worker le, executa no Pr
 - Aplicacao de efeitos de video
 - Aplicacao de efeitos de audio
 - Aplicacao de presets do usuario
+- Aplicacao de transicoes de video e audio
 - Insercao de itens do projeto direto na timeline
+- Reconstrucao do conteudo interno de sequencias do projeto em muitos casos reais
 - Insercao inteligente na proxima track livre
 - Criacao de nova track quando necessario
 - Suporte a video e audio nesse fluxo de insercao
@@ -94,6 +109,78 @@ O app Python escreve comandos em `premiere_cmd.json`, o worker le, executa no Pr
 - Organizacao de assets em `EffectPalette_Assets`
 - Limpeza de logs no startup e por comando
 - Refresh manual e refresh automatico de itens do projeto
+- Relatorio local para beta fechada em `Documents/FX.palette_Beta_Report`
+- Execucao sem prompt via `EffectPalette.pyw`
+- System tray com acoes rapidas quando `pystray` e `Pillow` estao disponiveis
+
+### Concluido recentemente
+
+- Aba `Transicoes`
+- Aplicacao de transicoes no inicio do clip
+- Aplicacao de transicoes no fim do clip
+- Aplicacao automatica entre dois clips quando o Premiere consegue resolver o corte
+- Dialog de escolha com mouse e teclado
+- Pacote local de feedback/logs para beta fechada
+- Launcher `.pyw` para uso sem console
+- Primeira versao de system tray
+- Instalador beta em PowerShell para copiar a extensao, criar `.venv`, instalar dependencias e criar atalhos
+- Estrutura inicial para gerar `FX.palette.exe` com PyInstaller e `FX.palette_Setup_*.exe` com Inno Setup
+
+### Modo beta fechada
+
+O app agora grava logs e eventos leves localmente em:
+
+- `Documents/FX.palette_Beta_Report`
+
+Esse fluxo nao envia nada automaticamente. A ideia e o usuario revisar e mandar manualmente o `.zip` gerado.
+
+O pacote pode incluir:
+
+- feedback do usuario
+- log do app Python
+- eventos locais da sessao
+- informacoes de hardware, sistema, tela, disco e localidade do PC
+- versao e idioma/locale do Premiere quando o CEP/ExtendScript conseguem reportar
+- `worker.log`
+- `premiere_host_info.json`
+- `premiere_diagnose.txt`
+- manifests pequenos do Premiere usados para debug
+- resumo do arquivo de presets, sem copiar o `premiere_presets.json` completo
+
+Quando o app detecta que o Premiere ficou aberto pelo tempo minimo configurado e depois foi fechado, ele abre um formulario simples pedindo:
+
+- nome
+- impressao geral
+- bugs encontrados
+- sugestoes de feature
+- comentarios adicionais
+
+### Instalacao beta / release
+
+O caminho recomendado para testers e usuarios finais e um instalador `.exe`, nao um `.ps1`.
+
+A estrutura de build fica em:
+
+- [packaging/build_release.ps1](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging/build_release.ps1)
+- [packaging/pyinstaller/EffectPalette.spec](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging/pyinstaller/EffectPalette.spec)
+- [packaging/inno/EffectPalette.iss](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging/inno/EffectPalette.iss)
+
+O fluxo planejado:
+
+- PyInstaller gera `FX.palette.exe` sem console
+- o build cria uma pasta limpa em `release/staging/EffectPalette`
+- Inno Setup gera `FX.palette_Setup_<versao>.exe`
+- o instalador copia tudo para `%APPDATA%\Adobe\CEP\extensions\EffectPalette`
+- o instalador habilita `PlayerDebugMode` em `HKCU\Software\Adobe\CSXS.*` para evitar configuracao manual de CEP durante a beta
+- o instalador cria atalhos no Menu Iniciar/Desktop
+- iniciar junto com o Windows fica como opcao do instalador
+
+O script antigo:
+
+- [installer/install_beta.ps1](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/installer/install_beta.ps1)
+
+fica apenas como fallback tecnico interno. Ele nao deve ser o fluxo principal de beta tester ou usuario final.
+
 
 ### Built-ins atuais da aba Favoritos
 
@@ -166,6 +253,8 @@ O fluxo de insercao de itens do projeto esta funcionando.
 - se nao houver track disponivel, cria nova track
 - funciona para video e audio
 - se o item for uma `Adjustment Layer` e houver multiplos clips selecionados, a layer cobre a selecao inteira
+- se o item do projeto for uma sequencia, a extensao tenta reconstruir o conteudo interno dela na timeline ativa, em vez de depender apenas do comportamento de nest do Premiere
+- nesse fluxo, efeitos extras e keyframes basicos desses clips internos tambem podem ser clonados para o destino
 
 ### Observacao
 
@@ -190,7 +279,7 @@ Hoje o sistema ja resolve:
 ### Limitacoes atuais
 
 1. **Keyframes em imagens e Adjustment Layers**
-   Ainda sao um problema real do ecossistema do Premiere/API. A extensao hoje mitiga isso com aviso antes de aplicar presets animados nesses alvos.
+   O fluxo melhorou bastante. A extensao agora usa um helper clip temporario para presets animados em clips "infinitos" e depois clona componentes e keyframes para o alvo real. Ainda assim, pode haver pequeno offset residual de `1-2` frames em alguns casos.
 
 2. **Curvas Bezier / Speed nao 100% fieis**
    A extensao aplica os keyframes principais em clips normais, mas nao tenta mais reconstruir agressivamente a curva original do preset com helper keys no fluxo padrao. O comportamento atual prioriza estabilidade: usa a interpolacao nativa do Premiere e um bezier padrao/aproximado quando necessario.
@@ -198,16 +287,21 @@ Hoje o sistema ja resolve:
 3. **Validacao gradual de edge cases**
    Ainda faz sentido continuar validando presets diferentes ao longo do uso real e de testes com usuarios.
 
-### Mitigacao atual para clips "infinitos"
+### Fallback atual para clips "infinitos"
 
 Se o preset tiver keyframes e a selecao atual incluir:
 
 - `Adjustment Layer`
 - imagem / still
 
-a UI mostra um aviso antes da aplicacao.
+a extensao agora tenta este fluxo:
 
-Isso evita prometer um comportamento que o Premiere ainda nao entrega de forma confiavel nesses tipos de clip.
+1. criar um helper clip finito temporario
+2. aplicar o preset nesse helper
+3. clonar os componentes e keyframes resultantes para o alvo real
+4. limpar o helper
+
+Na pratica, esse fallback passou a funcionar muito melhor em casos reais e deixou de ser apenas uma mitigacao teorica.
 
 ### Direcao futura para easing
 
@@ -216,7 +310,7 @@ Uma reconstrucao aproximada de easing por helper keys continua sendo uma ideia v
 Se esse caminho voltar no futuro, a direcao mais provavel e trata-lo como:
 
 - recurso experimental
-- focado primeiro em parametros e presets onde a aproximacao realmente compense
+- focado primeiro em presets onde a aproximacao realmente compense
 - possivelmente reavaliado quando houver um backend UXP mais maduro
 
 ---
@@ -300,15 +394,15 @@ Ou seja, se houver evolucao para UXP no futuro, ela deve acontecer como backend 
 
 ### Prioridade mais alta
 
-1. **Adicionar transicoes**
-2. **Mudar parametros de clipes**
-3. **Continuar ampliando os recursos da extensao antes de UI/beta**
+1. **Preparar closed beta**
+2. **Melhorar README e documentacao publica**
+3. **Continuar refinando estabilidade com testes reais**
 
 ### Prioridade media
 
-4. **System tray**
-5. **Gerar `.exe`**
-6. **Refinar ainda mais presets e keyframes conforme uso real**
+4. **Gerar `.exe`**
+5. **Refinar ainda mais presets e keyframes conforme uso real**
+6. **Investigar versao para macOS**
 
 ### Prioridade baixa
 
@@ -316,11 +410,19 @@ Ou seja, se houver evolucao para UXP no futuro, ela deve acontecer como backend 
 8. **Polimento da aba Favoritos**
 9. **Integracao com After Effects**
 
+### Investigacao macOS
+
+Uma versao para macOS deve ser avaliada depois da beta fechada no Windows. Pontos principais:
+
+- empacotar o app Python para macOS
+- adaptar instalador para copiar a extensao em `~/Library/Application Support/Adobe/CEP/extensions/EffectPalette`
+- validar hotkeys globais, system tray/menu bar e permissoes de acessibilidade
+- habilitar CEP debug quando necessario no ambiente macOS
+- avaliar assinatura/notarizacao para reduzir bloqueios do Gatekeeper
+
 ### Futuro estrategico
 
-10. **Arquitetura Full/Lite para o backend do Premiere**
-11. **Closed beta**
-12. **Melhorar README e documentacao publica**
+9. **Arquitetura Full/Lite para o backend do Premiere**
 
 ---
 
