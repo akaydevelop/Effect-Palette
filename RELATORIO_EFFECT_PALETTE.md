@@ -1,8 +1,8 @@
-# Effect Palette - Relatorio Atual do Projeto
+# FX.palette - Relatorio Atual do Projeto
 
 ## Visao Geral
 
-O **Effect Palette** e uma paleta flutuante para Adobe Premiere Pro, controlada por um app Python, que permite buscar e aplicar:
+O **FX.palette** e uma paleta flutuante para Adobe Premiere Pro, controlada por um app Python, que permite buscar e aplicar:
 
 - efeitos de video
 - efeitos de audio
@@ -25,13 +25,17 @@ O objetivo atual nao e mudar a UX principal. A paleta Python continua sendo o co
 ### Componentes
 
 ```text
-Effect Palette
+FX.palette
 |- app.py
 |- bridge.js
 |- scripts/host.jsx
 |- CSXS/manifest.xml
 |- worker.html
 |- EffectPalette.bat
+|- EffectPalette.pyw
+|- beta_report.py
+|- installer/
+|- packaging/
 |- data/
 |- template_project/
 ```
@@ -40,6 +44,15 @@ Effect Palette
 
 - [app.py](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/app.py)
   App Python com a paleta flutuante, hotkeys globais, watcher de arquivos e janela de debug.
+
+- [EffectPalette.pyw](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/EffectPalette.pyw)
+  Launcher para iniciar o app com `pythonw.exe`, sem janela de prompt no uso normal.
+
+- [beta_report.py](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/beta_report.py)
+  Coleta local de logs, eventos leves, informacoes do PC/Premiere e feedback para a beta fechada.
+
+- [packaging](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging)
+  Estrutura para empacotar o app com PyInstaller e gerar instalador `.exe` com Inno Setup.
 
 - [bridge.js](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/bridge.js)
   Worker CEP headless que faz polling, exporta dados do Premiere, le a fila de comandos e chama o host ExtendScript.
@@ -96,6 +109,9 @@ O app Python escreve comandos em `premiere_cmd.json`, o worker le, executa no Pr
 - Organizacao de assets em `EffectPalette_Assets`
 - Limpeza de logs no startup e por comando
 - Refresh manual e refresh automatico de itens do projeto
+- Relatorio local para beta fechada em `Documents/FX.palette_Beta_Report`
+- Execucao sem prompt via `EffectPalette.pyw`
+- System tray com acoes rapidas quando `pystray` e `Pillow` estao disponiveis
 
 ### Concluido recentemente
 
@@ -104,6 +120,67 @@ O app Python escreve comandos em `premiere_cmd.json`, o worker le, executa no Pr
 - Aplicacao de transicoes no fim do clip
 - Aplicacao automatica entre dois clips quando o Premiere consegue resolver o corte
 - Dialog de escolha com mouse e teclado
+- Pacote local de feedback/logs para beta fechada
+- Launcher `.pyw` para uso sem console
+- Primeira versao de system tray
+- Instalador beta em PowerShell para copiar a extensao, criar `.venv`, instalar dependencias e criar atalhos
+- Estrutura inicial para gerar `FX.palette.exe` com PyInstaller e `FX.palette_Setup_*.exe` com Inno Setup
+
+### Modo beta fechada
+
+O app agora grava logs e eventos leves localmente em:
+
+- `Documents/FX.palette_Beta_Report`
+
+Esse fluxo nao envia nada automaticamente. A ideia e o usuario revisar e mandar manualmente o `.zip` gerado.
+
+O pacote pode incluir:
+
+- feedback do usuario
+- log do app Python
+- eventos locais da sessao
+- informacoes de hardware, sistema, tela, disco e localidade do PC
+- versao e idioma/locale do Premiere quando o CEP/ExtendScript conseguem reportar
+- `worker.log`
+- `premiere_host_info.json`
+- `premiere_diagnose.txt`
+- manifests pequenos do Premiere usados para debug
+- resumo do arquivo de presets, sem copiar o `premiere_presets.json` completo
+
+Quando o app detecta que o Premiere ficou aberto pelo tempo minimo configurado e depois foi fechado, ele abre um formulario simples pedindo:
+
+- nome
+- impressao geral
+- bugs encontrados
+- sugestoes de feature
+- comentarios adicionais
+
+### Instalacao beta / release
+
+O caminho recomendado para testers e usuarios finais e um instalador `.exe`, nao um `.ps1`.
+
+A estrutura de build fica em:
+
+- [packaging/build_release.ps1](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging/build_release.ps1)
+- [packaging/pyinstaller/EffectPalette.spec](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging/pyinstaller/EffectPalette.spec)
+- [packaging/inno/EffectPalette.iss](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/packaging/inno/EffectPalette.iss)
+
+O fluxo planejado:
+
+- PyInstaller gera `FX.palette.exe` sem console
+- o build cria uma pasta limpa em `release/staging/EffectPalette`
+- Inno Setup gera `FX.palette_Setup_<versao>.exe`
+- o instalador copia tudo para `%APPDATA%\Adobe\CEP\extensions\EffectPalette`
+- o instalador habilita `PlayerDebugMode` em `HKCU\Software\Adobe\CSXS.*` para evitar configuracao manual de CEP durante a beta
+- o instalador cria atalhos no Menu Iniciar/Desktop
+- iniciar junto com o Windows fica como opcao do instalador
+
+O script antigo:
+
+- [installer/install_beta.ps1](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/installer/install_beta.ps1)
+
+fica apenas como fallback tecnico interno. Ele nao deve ser o fluxo principal de beta tester ou usuario final.
+
 
 ### Built-ins atuais da aba Favoritos
 
@@ -323,9 +400,9 @@ Ou seja, se houver evolucao para UXP no futuro, ela deve acontecer como backend 
 
 ### Prioridade media
 
-4. **System tray**
-5. **Gerar `.exe`**
-6. **Refinar ainda mais presets e keyframes conforme uso real**
+4. **Gerar `.exe`**
+5. **Refinar ainda mais presets e keyframes conforme uso real**
+6. **Investigar versao para macOS**
 
 ### Prioridade baixa
 
@@ -333,9 +410,19 @@ Ou seja, se houver evolucao para UXP no futuro, ela deve acontecer como backend 
 8. **Polimento da aba Favoritos**
 9. **Integracao com After Effects**
 
+### Investigacao macOS
+
+Uma versao para macOS deve ser avaliada depois da beta fechada no Windows. Pontos principais:
+
+- empacotar o app Python para macOS
+- adaptar instalador para copiar a extensao em `~/Library/Application Support/Adobe/CEP/extensions/EffectPalette`
+- validar hotkeys globais, system tray/menu bar e permissoes de acessibilidade
+- habilitar CEP debug quando necessario no ambiente macOS
+- avaliar assinatura/notarizacao para reduzir bloqueios do Gatekeeper
+
 ### Futuro estrategico
 
-10. **Arquitetura Full/Lite para o backend do Premiere**
+9. **Arquitetura Full/Lite para o backend do Premiere**
 
 ---
 

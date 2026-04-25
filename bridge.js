@@ -19,6 +19,7 @@ const PRESETS_FILE  = path.join(DATA_DIR, "premiere_presets.json");
 const PROJECT_ITEMS_FILE = path.join(DATA_DIR, "premiere_project_items.json");
 const FAVORITES_FILE = path.join(DATA_DIR, "premiere_favorites.json");
 const SEQUENCES_FILE = path.join(DATA_DIR, "premiere_sequences.json");
+const HOST_INFO_FILE = path.join(DATA_DIR, "premiere_host_info.json");
 const CMD_FILE      = path.join(DATA_DIR, "premiere_cmd.json");
 const LOG_FILE      = path.join(DATA_DIR, "premiere_diagnose.txt");
 const WORKER_LOG_FILE = path.join(DATA_DIR, "worker.log");
@@ -154,6 +155,46 @@ function evalHostScript(script, callback) {
 }
 
 // ─── 1. Exportar efeitos ──────────────────────────────────────────────────────
+
+function exportHostInfo(reason) {
+  log("Exportando informacoes do host" + (reason ? " (" + reason + ")" : "") + "...");
+
+  const hostEnv = cs.getHostEnvironment ? cs.getHostEnvironment() : {};
+  evalHostScript("getPremiereHostInfoSafe()", function(result) {
+    let hostInfo = {};
+    if (result && result !== "EvalScript error." && result.indexOf("Error") !== 0) {
+      try {
+        hostInfo = JSON.parse(result);
+      } catch (e) {
+        hostInfo = { parse_error: e.message, raw: String(result || "") };
+      }
+    } else {
+      hostInfo = { error: String(result || "") };
+    }
+
+    const payload = {
+      version: 1,
+      exported_at: Date.now() / 1000,
+      reason: reason || "",
+      cep_host_environment: {
+        app_id: hostEnv.appId || "",
+        app_name: hostEnv.appName || "",
+        app_version: hostEnv.appVersion || "",
+        app_locale: hostEnv.appLocale || "",
+        app_ui_locale: hostEnv.appUILocale || "",
+        is_app_online: !!hostEnv.isAppOnline,
+      },
+      host: hostInfo,
+    };
+
+    try {
+      writeSafe(HOST_INFO_FILE, JSON.stringify(payload, null, 2));
+      log("✓ Informacoes do host exportadas", "ok");
+    } catch (e) {
+      log("Erro ao exportar informacoes do host: " + e.message, "err");
+    }
+  });
+}
 
 function exportEffects() {
   setStatus("Exportando efeitos...", "waiting");
@@ -619,6 +660,7 @@ function startPolling() {
             insertFavoriteItem(cmd);
           } else if (cmd.command === "exportEffects") {
             markCmdStatus("processing");
+            exportHostInfo("manual");
             exportEffects();
             exportPresets();
             exportProjectItems("manual");
@@ -974,7 +1016,7 @@ function runDiagnose() {
 
 function init() {
   trimWorkerLogOnStartup();
-  log("Effect Palette " + (IS_DEBUG_PANEL ? "debug panel" : "worker") + " carregado");
+  log("FX.palette " + (IS_DEBUG_PANEL ? "debug panel" : "worker") + " carregado");
 
   try {
     if (fs.existsSync(CMD_FILE)) {
@@ -984,6 +1026,7 @@ function init() {
   } catch (e) {}
 
   setTimeout(function() {
+    exportHostInfo("startup");
     exportEffects();
     exportPresets();
     exportProjectItems("startup");

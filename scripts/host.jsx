@@ -25,6 +25,69 @@ function diagnose() {
   }
 }
 
+function getPremiereHostInfoSafe() {
+  try {
+    var info = {
+      app: {},
+      locale: {},
+      project: {},
+      activeSequence: {},
+      qe: {}
+    };
+
+    try { info.app.version = String(app.version || ""); } catch (e0) {}
+    try { info.app.build = String(app.build || ""); } catch (e1) {}
+    try { info.app.name = String(app.name || ""); } catch (e2) {}
+    try { info.app.path = String(app.path || ""); } catch (e3) {}
+    try { info.app.preferencesPath = String(app.getPProPrefPath ? app.getPProPrefPath() : ""); } catch (e4) {}
+
+    try { info.locale.extendscriptLocale = String($.locale || ""); } catch (e5) {}
+    try { info.locale.appLocale = String(app.locale || ""); } catch (e6) {}
+    try { info.locale.appLanguage = String(app.language || ""); } catch (e7) {}
+    try { info.locale.appUILocale = String(app.uiLocale || ""); } catch (e8) {}
+
+    try { info.project.name = String(app.project && app.project.name ? app.project.name : ""); } catch (e9) {}
+    try { info.project.path = String(app.project && app.project.path ? app.project.path : ""); } catch (e10) {}
+
+    var sequence = null;
+    try { sequence = app.project ? app.project.activeSequence : null; } catch (e11) {}
+    if (sequence) {
+      try { info.activeSequence.name = String(sequence.name || ""); } catch (e12) {}
+      try { info.activeSequence.frameSizeHorizontal = Number(sequence.frameSizeHorizontal) || 0; } catch (e13) {}
+      try { info.activeSequence.frameSizeVertical = Number(sequence.frameSizeVertical) || 0; } catch (e14) {}
+      try { info.activeSequence.timebase = String(sequence.timebase || ""); } catch (e15) {}
+      try {
+        if (typeof sequence.getSettings === "function") {
+          var settings = sequence.getSettings();
+          info.activeSequence.settings = {
+            videoFrameWidth: settings && settings.videoFrameWidth ? Number(settings.videoFrameWidth) : 0,
+            videoFrameHeight: settings && settings.videoFrameHeight ? Number(settings.videoFrameHeight) : 0,
+            videoPixelAspectRatioNumerator: settings && settings.videoPixelAspectRatioNumerator ? Number(settings.videoPixelAspectRatioNumerator) : 0,
+            videoPixelAspectRatioDenominator: settings && settings.videoPixelAspectRatioDenominator ? Number(settings.videoPixelAspectRatioDenominator) : 0,
+            audioSampleRate: settings && settings.audioSampleRate ? Number(settings.audioSampleRate) : 0
+          };
+        }
+      } catch (e16) {}
+    }
+
+    try {
+      app.enableQE();
+      info.qe.available = typeof qe !== "undefined" && !!qe.project;
+      if (info.qe.available) {
+        try { info.qe.videoEffectCount = qe.project.getVideoEffectList().length; } catch (e17) {}
+        try { info.qe.audioEffectCount = qe.project.getAudioEffectList().length; } catch (e18) {}
+      }
+    } catch (e19) {
+      info.qe.available = false;
+      info.qe.error = String(e19.message || e19);
+    }
+
+    return JSON.stringify(info);
+  } catch (e) {
+    return "Error: " + e.message;
+  }
+}
+
 // ─── 1. Exportar lista de efeitos ─────────────────────────────────────────────
 
 function getProjectIdentity() {
