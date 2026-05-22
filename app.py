@@ -55,6 +55,15 @@ except Exception:
     ImageDraw = None
     HAS_TRAY = False
 
+try:
+    from PySide6 import QtCore, QtGui, QtWidgets
+    HAS_QT = True
+except Exception:
+    QtCore = None
+    QtGui = None
+    QtWidgets = None
+    HAS_QT = False
+
 
 TEMP = Path(os.environ.get("TEMP", "C:/Temp"))
 APPDATA = Path(os.environ.get("APPDATA", ""))
@@ -105,6 +114,8 @@ PILL_ANIMATION_MS = 120
 INTERACTIVE_SETTLE_MS = 120
 DEBUG_PERF = False
 RESULTS_RENDER_OVERSCAN = 4
+QT_INITIAL_RENDER_ROWS = 16
+QT_RENDER_CHUNK_ROWS = 48
 USE_WINDOW_ALPHA = False
 FIXED_SEARCH_WINDOW_WIDTH = 760
 POINTER_WINDOW_MARGIN = 12
@@ -3283,6 +3294,892 @@ class EffectPalette:
         self.root.mainloop()
 
 
+if HAS_QT:
+    class QtRootAdapter(QtCore.QObject):
+        _schedule_requested = QtCore.Signal(int, int)
+
+        def __init__(self, app: QtWidgets.QApplication):
+            super().__init__()
+            self.app = app
+            self._next_job_id = 1
+            self._callbacks: dict[int, Callable] = {}
+            self._timers: dict[int, QtCore.QTimer] = {}
+            self._destroyed = False
+            self._schedule_requested.connect(self._start_timer, QtCore.Qt.ConnectionType.QueuedConnection)
+
+        def after(self, delay_ms: int, callback=None, *args):
+            if callback is None:
+                return None
+            job_id = self._next_job_id
+            self._next_job_id += 1
+            self._callbacks[job_id] = lambda: callback(*args)
+            self._schedule_requested.emit(max(0, int(delay_ms)), job_id)
+            return job_id
+
+        def after_idle(self, callback=None, *args):
+            return self.after(0, callback, *args)
+
+        def after_cancel(self, job_id):
+            if job_id is None:
+                return
+            self._callbacks.pop(job_id, None)
+            timer = self._timers.pop(job_id, None)
+            if timer is not None:
+                timer.stop()
+                timer.deleteLater()
+
+        @QtCore.Slot(int, int)
+        def _start_timer(self, delay_ms: int, job_id: int):
+            if job_id not in self._callbacks or self._destroyed:
+                return
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+
+            def fire():
+                self._timers.pop(job_id, None)
+                callback = self._callbacks.pop(job_id, None)
+                timer.deleteLater()
+                if callback is not None and not self._destroyed:
+                    callback()
+
+            timer.timeout.connect(fire)
+            self._timers[job_id] = timer
+            timer.start(delay_ms)
+
+        def winfo_exists(self):
+            return not self._destroyed
+
+        def winfo_screenwidth(self):
+            screen = self.app.primaryScreen()
+            return screen.availableGeometry().width() if screen else 1920
+
+        def winfo_screenheight(self):
+            screen = self.app.primaryScreen()
+            return screen.availableGeometry().height() if screen else 1080
+
+        def bind(self, *_args, **_kwargs):
+            return None
+
+        def bind_all(self, *_args, **_kwargs):
+            return None
+
+        def unbind(self, *_args, **_kwargs):
+            return None
+
+        def update(self):
+            self.app.processEvents()
+
+        def update_idletasks(self):
+            self.app.processEvents()
+
+        def mainloop(self):
+            return self.app.exec()
+
+        def destroy(self):
+            self._destroyed = True
+            for job_id in list(self._callbacks):
+                self.after_cancel(job_id)
+            self.app.quit()
+
+
+    class QtResultRowWidget(QtWidgets.QFrame):
+        def __init__(self, model: ResultRowModel, parent=None):
+            super().__init__(parent)
+            self.model = model
+            self.setObjectName("resultRow")
+            self.setFixedHeight(PaletteLayoutMetrics().row_height)
+            self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+            layout = QtWidgets.QHBoxLayout(self)
+            layout.setContentsMargins(16, 6, 10, 6)
+            layout.setSpacing(10)
+
+            self.icon = QtWidgets.QLabel(get_icon_glyph(model.icon_kind))
+            self.icon.setObjectName("rowIcon")
+            self.icon.setFixedWidth(20)
+            self.icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.icon)
+
+            text_layout = QtWidgets.QVBoxLayout()
+            text_layout.setContentsMargins(0, 0, 0, 0)
+            text_layout.setSpacing(1)
+            self.title = QtWidgets.QLabel(model.title)
+            self.title.setObjectName("rowTitle")
+            self.title.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.NoTextInteraction)
+            self.subtitle = QtWidgets.QLabel(model.subtitle)
+            self.subtitle.setObjectName("rowSubtitle")
+            self.subtitle.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.NoTextInteraction)
+            text_layout.addWidget(self.title)
+            text_layout.addWidget(self.subtitle)
+            layout.addLayout(text_layout, 1)
+
+            self.badge = QtWidgets.QLabel(model.type_label)
+            self.badge.setObjectName("rowBadge")
+            self.badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.badge)
+            self.apply_state(selected=False)
+
+        def apply_state(self, *, selected: bool):
+            tokens = get_row_visual_tokens(self.model.accent_kind, selected=selected, hovered=False)
+            self.setStyleSheet(
+                f"""
+                QFrame#resultRow {{
+                    background: {tokens["bg"]};
+                    border: 1px solid {tokens["border"]};
+                    border-radius: 12px;
+                }}
+                QLabel#rowTitle {{
+                    color: {tokens["title_fg"]};
+                    font-weight: 700;
+                    background: transparent;
+                }}
+                QLabel#rowSubtitle {{
+                    color: {tokens["subtitle_fg"]};
+                    font-size: 11px;
+                    background: transparent;
+                }}
+                QLabel#rowIcon {{
+                    color: {tokens["icon_fg"]};
+                    background: transparent;
+                    font-size: 14px;
+                }}
+                QLabel#rowBadge {{
+                    color: {tokens["type_fg"]};
+                    background: {tokens["type_bg"]};
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 11px;
+                    font-weight: 700;
+                }}
+                """
+            )
+
+
+    class QtPaletteWindow(QtWidgets.QWidget):
+        def __init__(self, palette):
+            super().__init__(None)
+            self.palette = palette
+            self.setWindowFlags(
+                QtCore.Qt.WindowType.FramelessWindowHint
+                | QtCore.Qt.WindowType.Tool
+                | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            )
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        def keyPressEvent(self, event):
+            key = event.key()
+            if key == QtCore.Qt.Key.Key_Escape:
+                self.palette.hide()
+                return
+            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                self.palette._apply_selected()
+                return
+            if key == QtCore.Qt.Key.Key_Down:
+                self.palette._move_selection(1)
+                return
+            if key == QtCore.Qt.Key.Key_Up:
+                self.palette._move_selection(-1)
+                return
+            super().keyPressEvent(event)
+
+
+    class QtEffectPalette:
+        CATEGORY_TYPE_FILTERS = EffectPalette.CATEGORY_TYPE_FILTERS
+
+        def __init__(self):
+            self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+            self.app.setQuitOnLastWindowClosed(False)
+            self.root = QtRootAdapter(self.app)
+            self.loader = EffectsLoader()
+            self.is_open = False
+            self._active_category = None
+            self._current_results: list[dict] = []
+            self._current_row_models: list[ResultRowModel] = []
+            self._current_result_set = SearchResultSet(items=(), total_count=0, visible_count=0, query="")
+            self._search_job = None
+            self._data_refresh_job = None
+            self._watch_job = None
+            self._data_observer = None
+            self._premiere_monitor_job = None
+            self._premiere_seen = False
+            self._premiere_seen_since = None
+            self._feedback_prompt_shown = False
+            self._row_widgets: list[QtResultRowWidget] = []
+            self._render_chunk_job = None
+            self._render_generation = 0
+            self._qt_middle_height = 0
+            self.tray_controller = None
+            self._exiting = False
+            self._build()
+            self._start_file_watcher()
+            self._start_premiere_monitor()
+
+        def _build(self):
+            self._load_qt_fonts()
+            self.ui_font_family = self._choose_qt_font_family()
+            self.window = QtPaletteWindow(self)
+            self.window.setObjectName("paletteWindow")
+            self.window.setFixedWidth(FIXED_SEARCH_WINDOW_WIDTH)
+
+            root_layout = QtWidgets.QVBoxLayout(self.window)
+            root_layout.setContentsMargins(0, 0, 0, 0)
+            root_layout.setSpacing(0)
+
+            self.top_card = QtWidgets.QFrame()
+            self.top_card.setObjectName("topCard")
+            top_layout = QtWidgets.QVBoxLayout(self.top_card)
+            top_layout.setContentsMargins(8, 8, 8, 8)
+            top_layout.setSpacing(0)
+            root_layout.addWidget(self.top_card)
+
+            search_row = QtWidgets.QHBoxLayout()
+            search_row.setContentsMargins(14, 0, 14, 0)
+            search_row.setSpacing(8)
+            self.prompt = QtWidgets.QLabel(">")
+            self.prompt.setObjectName("prompt")
+            self.entry = QtWidgets.QLineEdit()
+            self.entry.setObjectName("searchEntry")
+            self.entry.setFrame(False)
+            self.entry.textChanged.connect(self._on_search_change)
+            self.refresh_btn = QtWidgets.QPushButton(get_reload_icon_glyph())
+            self.refresh_btn.setObjectName("refreshButton")
+            self.refresh_btn.setFixedSize(28, 28)
+            self.refresh_btn.clicked.connect(self._manual_refresh)
+            search_row.addWidget(self.prompt)
+            search_row.addWidget(self.entry, 1)
+            search_row.addWidget(self.refresh_btn)
+            top_layout.addLayout(search_row)
+
+            divider = QtWidgets.QFrame()
+            divider.setObjectName("divider")
+            divider.setFixedHeight(1)
+            top_layout.addWidget(divider)
+
+            filters_row = QtWidgets.QHBoxLayout()
+            filters_row.setContentsMargins(14, 7, 14, 6)
+            filters_row.setSpacing(8)
+            self.category_buttons: dict[str, QtWidgets.QPushButton] = {}
+            for category in ["Todos", "Video", "Audio", "Presets", "Projeto", "Favoritos"]:
+                button = QtWidgets.QPushButton(category)
+                button.setObjectName("categoryButton")
+                button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(lambda _checked=False, c=category: self._on_category_click(c))
+                self.category_buttons[category] = button
+                filters_row.addWidget(button)
+            filters_row.addStretch(1)
+            self.conn_dot = QtWidgets.QLabel()
+            self.conn_dot.setObjectName("connectionDot")
+            self.conn_dot.setFixedSize(10, 10)
+            filters_row.addWidget(self.conn_dot)
+            top_layout.addLayout(filters_row)
+
+            self.body_card = QtWidgets.QFrame()
+            self.body_card.setObjectName("bodyCard")
+            body_layout = QtWidgets.QVBoxLayout(self.body_card)
+            body_layout.setContentsMargins(8, 8, 8, 8)
+            body_layout.setSpacing(0)
+            root_layout.addWidget(self.body_card)
+
+            self.empty_label = QtWidgets.QLabel("No results")
+            self.empty_label.setObjectName("emptyLabel")
+            self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.results_list = QtWidgets.QListWidget()
+            self.results_list.setObjectName("resultsList")
+            self.results_list.setUniformItemSizes(False)
+            self.results_list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+            self.results_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.results_list.currentRowChanged.connect(self._sync_row_selection)
+            self.results_list.itemDoubleClicked.connect(lambda _item: self._apply_selected())
+            body_layout.addWidget(self.empty_label)
+            body_layout.addWidget(self.results_list)
+
+            self.footer = QtWidgets.QFrame()
+            self.footer.setObjectName("footer")
+            footer_layout = QtWidgets.QHBoxLayout(self.footer)
+            footer_layout.setContentsMargins(16, 9, 16, 9)
+            self.help_label = QtWidgets.QLabel("Up/Down navegar   Enter aplicar   ESC fechar")
+            self.help_label.setObjectName("helpLabel")
+            self.status_label = QtWidgets.QLabel("")
+            self.status_label.setObjectName("statusLabel")
+            footer_layout.addWidget(self.help_label)
+            footer_layout.addStretch(1)
+            footer_layout.addWidget(self.status_label)
+            body_layout.addWidget(self.footer)
+
+            self._apply_styles()
+            self._update_category_buttons()
+            self._update_connection_indicator()
+            self._set_idle_state()
+            self.window.hide()
+
+        def _load_qt_fonts(self):
+            for font_path in (GOOGLE_SANS_FLEX_REGULAR, GOOGLE_SANS_FLEX_MEDIUM):
+                if font_path.exists():
+                    QtGui.QFontDatabase.addApplicationFont(str(font_path))
+
+        def _choose_qt_font_family(self) -> str:
+            families = set(QtGui.QFontDatabase.families())
+            return "Google Sans Flex" if "Google Sans Flex" in families else "Segoe UI"
+
+        def _apply_styles(self):
+            self.window.setStyleSheet(
+                f"""
+                QWidget {{
+                    font-family: "{self.ui_font_family}";
+                    color: {TEXT};
+                }}
+                QFrame#topCard {{
+                    background: {BG2};
+                    border: 1px solid {BORDER};
+                    border-radius: 16px;
+                }}
+                QFrame#bodyCard {{
+                    background: {BG};
+                    border: 1px solid {BORDER};
+                    border-radius: 8px;
+                }}
+                QFrame#divider {{
+                    background: {BORDER};
+                    border: 0;
+                }}
+                QLabel#prompt {{
+                    color: {ACCENT};
+                    font-size: 15px;
+                }}
+                QLineEdit#searchEntry {{
+                    background: {BG2};
+                    color: {TEXT};
+                    selection-background-color: {ACCENT};
+                    border: 0;
+                    padding: 13px 0;
+                    font-size: {SEARCH_FONT_SIZE}px;
+                }}
+                QPushButton#refreshButton {{
+                    color: {TEXT_MUTED};
+                    background: {REFRESH_BUTTON_BG};
+                    border: 1px solid {REFRESH_BUTTON_BORDER};
+                    border-radius: 6px;
+                    font-size: 13px;
+                }}
+                QPushButton#refreshButton:hover {{
+                    color: {ACCENT};
+                    background: {REFRESH_BUTTON_HOVER_BG};
+                    border-color: {blend_colors(REFRESH_BUTTON_BORDER, ACCENT, 0.42)};
+                }}
+                QListWidget#resultsList {{
+                    background: {BG};
+                    border: 0;
+                    outline: 0;
+                    padding: 6px;
+                }}
+                QListWidget#resultsList::item {{
+                    border: 0;
+                    padding: 0;
+                    margin: 0 0 4px 0;
+                }}
+                QLabel#emptyLabel {{
+                    color: {TEXT_MUTED};
+                    background: {BG};
+                    padding: 24px;
+                }}
+                QFrame#footer {{
+                    background: {BG};
+                    border-top: 1px solid {ROW_BORDER};
+                }}
+                QLabel#helpLabel {{
+                    color: {TEXT_MUTED};
+                    font-size: 11px;
+                }}
+                QLabel#statusLabel {{
+                    color: {ACCENT};
+                    font-size: 11px;
+                    font-weight: 700;
+                }}
+                QScrollBar:vertical {{
+                    background: {BG};
+                    width: 7px;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: {TEXT_MUTED};
+                    border-radius: 3px;
+                    min-height: 32px;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0;
+                }}
+                """
+            )
+
+        def _style_category_button(self, button: QtWidgets.QPushButton, category: str, active: bool):
+            tokens = get_pill_visual_tokens(category, active=active)
+            button.setStyleSheet(
+                f"""
+                QPushButton#categoryButton {{
+                    background: {tokens["bg"]};
+                    color: {tokens["fg"]};
+                    border: 1px solid {tokens["border"]};
+                    border-radius: 6px;
+                    padding: 5px 13px;
+                    min-width: 42px;
+                    font-size: 11px;
+                    font-weight: 700;
+                }}
+                """
+            )
+
+        def _update_category_buttons(self):
+            for category, button in self.category_buttons.items():
+                active = (category == "Todos" and self._active_category is None) or category == self._active_category
+                self._style_category_button(button, category, active)
+
+        def _update_connection_indicator(self):
+            tokens = get_connection_state_tokens(self.loader.snapshot.connection_state)
+            self.conn_dot.setStyleSheet(
+                f"background: {tokens['fill']}; border: 1px solid {tokens['outline']}; border-radius: 5px;"
+            )
+
+        def _build_result_row_model(self, effect: dict) -> ResultRowModel:
+            return EffectPalette._build_result_row_model(self, effect)
+
+        def _result_row_key(self, payload: dict) -> str:
+            return build_result_row_key(payload)
+
+        def _resolve_type_filters(self) -> set[str] | None:
+            if self._active_category is None:
+                return None
+            return self.CATEGORY_TYPE_FILTERS.get(self._active_category)
+
+        def _on_category_click(self, category: str):
+            self._active_category = None if category == "Todos" else category
+            self._update_category_buttons()
+            self._refresh_list()
+
+        def _on_search_change(self, *_args):
+            if self._search_job is not None:
+                self.root.after_cancel(self._search_job)
+                self._search_job = None
+            self._refresh_list()
+
+        def _refresh_list(self):
+            self._search_job = None
+            query = self.entry.text().strip()
+            self._current_result_set = self.loader.search(query, type_filters=self._resolve_type_filters())
+            self._current_results = list(self._current_result_set.items)
+            if not query:
+                self._cancel_render_chunk()
+                self._current_row_models = []
+                self._row_widgets = []
+                self.results_list.clear()
+                self.status_label.setText("")
+                self._set_idle_state()
+                self._resize_to_content()
+                return
+            self._current_row_models = [self._build_result_row_model(effect) for effect in self._current_results]
+            if not self._current_row_models:
+                self.status_label.setText("0 resultados")
+                self._set_message_state()
+                self._resize_to_content()
+                return
+            self._populate_results()
+            self.status_label.setText(f"{self._current_result_set.visible_count}/{self._current_result_set.total_count} resultados")
+            self._set_results_state()
+            self._resize_to_content()
+
+        def _cancel_render_chunk(self):
+            self._render_generation += 1
+            if self._render_chunk_job is not None:
+                self.root.after_cancel(self._render_chunk_job)
+                self._render_chunk_job = None
+
+        def _set_idle_state(self):
+            self._qt_middle_height = 0
+            self.results_list.setFixedHeight(0)
+            self.results_list.hide()
+            self.empty_label.setFixedHeight(0)
+            self.empty_label.hide()
+            self.body_card.show()
+
+        def _set_message_state(self):
+            self._qt_middle_height = 84
+            self.results_list.setFixedHeight(0)
+            self.results_list.hide()
+            self.empty_label.setFixedHeight(84)
+            self.empty_label.show()
+            self.body_card.show()
+
+        def _set_results_state(self):
+            self._qt_middle_height = RESULTS_EXPANDED_HEIGHT
+            self.empty_label.setFixedHeight(0)
+            self.empty_label.hide()
+            self.results_list.setFixedHeight(RESULTS_EXPANDED_HEIGHT)
+            self.results_list.show()
+            self.body_card.show()
+
+        def _populate_results(self):
+            self._cancel_render_chunk()
+            self.results_list.setUpdatesEnabled(False)
+            self.results_list.clear()
+            self._row_widgets = []
+            self.results_list.setUpdatesEnabled(True)
+            generation = self._render_generation
+            self._append_result_rows(0, QT_INITIAL_RENDER_ROWS, generation)
+
+        def _append_result_rows(self, start: int, count: int, generation: int):
+            if generation != self._render_generation:
+                return
+            end = min(len(self._current_row_models), start + count)
+            self.results_list.setUpdatesEnabled(False)
+            try:
+                for model in self._current_row_models[start:end]:
+                    item = QtWidgets.QListWidgetItem()
+                    item.setData(QtCore.Qt.ItemDataRole.UserRole, model.payload)
+                    item.setSizeHint(QtCore.QSize(FIXED_SEARCH_WINDOW_WIDTH - 34, PaletteLayoutMetrics().row_height + 4))
+                    self.results_list.addItem(item)
+                    row_widget = QtResultRowWidget(model)
+                    self.results_list.setItemWidget(item, row_widget)
+                    self._row_widgets.append(row_widget)
+                if start == 0 and self._row_widgets:
+                    self.results_list.setCurrentRow(0)
+                    self._sync_row_selection(0)
+            finally:
+                self.results_list.setUpdatesEnabled(True)
+            if end < len(self._current_row_models):
+                self._render_chunk_job = self.root.after(
+                    1,
+                    lambda next_start=end, gen=generation: self._append_result_rows(next_start, QT_RENDER_CHUNK_ROWS, gen),
+                )
+            else:
+                self._render_chunk_job = None
+
+        def _sync_row_selection(self, selected_row: int):
+            for index, row in enumerate(self._row_widgets):
+                row.apply_state(selected=index == selected_row)
+
+        def _move_selection(self, direction: int):
+            if not self._row_widgets:
+                return
+            row = self.results_list.currentRow()
+            if row < 0:
+                row = 0
+            self.results_list.setCurrentRow(max(0, min(row + direction, len(self._row_widgets) - 1)))
+
+        def _selected_payload(self):
+            row = self.results_list.currentRow()
+            if 0 <= row < len(self._current_row_models):
+                return self._current_row_models[row].payload
+            return None
+
+        def _apply_selected(self):
+            effect = self._selected_payload()
+            if not effect:
+                return
+            if preset_has_keyframes(effect):
+                selection = load_current_selection(self.loader.paths)
+                if selection_has_infinite_warning_targets(selection):
+                    result = QtWidgets.QMessageBox.question(
+                        self.window,
+                        "Aviso sobre keyframes",
+                        "Este preset possui keyframes e a selecao atual inclui uma Adjustment Layer ou uma imagem.\n\nDeseja aplicar mesmo assim?",
+                    )
+                    if result != QtWidgets.QMessageBox.StandardButton.Yes:
+                        self.status_label.setText("Aplicacao cancelada")
+                        return
+            send_command(effect)
+            self.status_label.setText(f"[Aplicado] {effect.get('name', '')}")
+            self.root.after(900, self.hide)
+
+        def _manual_refresh(self):
+            send_debug_command("exportEffects")
+            self.status_label.setText("Solicitando atualizacao ao Premiere...")
+            self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
+
+        def _on_loader_snapshot_ready(self, snapshot: LoaderSnapshot):
+            print(f"[Watcher] Lista atualizada - {snapshot.count} efeitos")
+            self._update_connection_indicator()
+            if self.is_open:
+                self._refresh_list()
+
+        def schedule_data_refresh(self):
+            if self._data_refresh_job is not None:
+                self.root.after_cancel(self._data_refresh_job)
+            self._data_refresh_job = self.root.after(RELOAD_COALESCE_MS, self._consume_data_refresh)
+
+        def _consume_data_refresh(self):
+            self._data_refresh_job = None
+            self.loader.request_refresh(self.root, self._on_loader_snapshot_ready)
+
+        def _start_file_watcher(self):
+            self.loader.paths.data_dir.mkdir(parents=True, exist_ok=True)
+            if HAS_WATCHDOG:
+                handler = DataFilesChangeHandler(self)
+                self._data_observer = Observer()
+                self._data_observer.schedule(handler, str(self.loader.paths.data_dir), recursive=False)
+                self._data_observer.start()
+                return
+
+            def watch():
+                if self.loader.needs_reload():
+                    self.loader.request_refresh(self.root, self._on_loader_snapshot_ready)
+                self._watch_job = self.root.after(int(WATCH_INTERVAL * 1000), watch)
+
+            self._watch_job = self.root.after(int(WATCH_INTERVAL * 1000), watch)
+
+        def _start_premiere_monitor(self):
+            self._premiere_monitor_job = self.root.after(5000, self._monitor_premiere_shutdown)
+
+        def _monitor_premiere_shutdown(self):
+            self._premiere_monitor_job = None
+            try:
+                running = premiere_is_running()
+                now = time.time()
+                if running:
+                    if not self._premiere_seen:
+                        self._premiere_seen_since = now
+                        beta_report.write_event("premiere_detected")
+                    self._premiere_seen = True
+                elif self._premiere_seen and not self._feedback_prompt_shown:
+                    open_seconds = now - (self._premiere_seen_since or now)
+                    self._premiere_seen = False
+                    self._premiere_seen_since = None
+                    if open_seconds >= BETA_FEEDBACK_MIN_OPEN_SECONDS:
+                        self._feedback_prompt_shown = True
+                        self._show_beta_feedback_dialog()
+            except Exception as exc:
+                beta_report.log_exception("Premiere monitor failed", exc)
+            finally:
+                if self.root.winfo_exists():
+                    self._premiere_monitor_job = self.root.after(PREMIERE_MONITOR_INTERVAL_MS, self._monitor_premiere_shutdown)
+
+        def _show_beta_feedback_dialog(self):
+            result = QtWidgets.QMessageBox.question(
+                self.window,
+                "FX.palette - Feedback da beta",
+                "O Premiere parece ter sido fechado. Gerar um relatorio beta agora?",
+            )
+            if result != QtWidgets.QMessageBox.StandardButton.Yes:
+                beta_report.write_event("feedback_prompt_skipped")
+                return
+            try:
+                report_path = beta_report.build_report(None, EXT_DATA, APP_DIR, reason="feedback_after_premiere_closed")
+                self.show_message("Relatorio salvo", "Envie este arquivo ao Paulo:\n" + str(report_path))
+            except Exception as exc:
+                beta_report.log_exception("Failed to save beta feedback", exc)
+                self.show_message("Erro ao gerar relatorio", "Nao consegui salvar o relatorio beta.", error=True)
+
+        def _anchor_window_to_pointer(self):
+            screen = self.app.primaryScreen()
+            available = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1920, 1080)
+            pointer = QtGui.QCursor.pos()
+            width = self.window.width()
+            height = self.window.sizeHint().height()
+            x, y = choose_window_position_near_pointer(
+                pointer_x=pointer.x(),
+                pointer_y=pointer.y(),
+                window_width=width,
+                window_height=height,
+                screen_width=available.width(),
+                screen_height=available.height(),
+            )
+            self.window.move(available.x() + x, available.y() + y)
+
+        def _resize_to_content(self):
+            self.window.setMinimumSize(FIXED_SEARCH_WINDOW_WIDTH, 0)
+            self.window.setMaximumSize(FIXED_SEARCH_WINDOW_WIDTH, 16777215)
+            self.window.layout().activate()
+            body_margins = self.body_card.layout().contentsMargins()
+            body_extra = body_margins.top() + body_margins.bottom() + 2
+            target_height = (
+                self.top_card.sizeHint().height()
+                + self.footer.sizeHint().height()
+                + self._qt_middle_height
+                + body_extra
+            )
+            self.window.setFixedSize(FIXED_SEARCH_WINDOW_WIDTH, target_height)
+            if self.is_open:
+                self._anchor_window_to_pointer()
+
+        def show(self):
+            if self.is_open:
+                self.window.raise_()
+                self.window.activateWindow()
+                self.entry.setFocus()
+                return
+            self.is_open = True
+            self.entry.blockSignals(True)
+            self.entry.clear()
+            self.entry.blockSignals(False)
+            self._active_category = None
+            self._update_category_buttons()
+            self._refresh_list()
+            self._resize_to_content()
+            self._anchor_window_to_pointer()
+            self.window.setWindowOpacity(0.0)
+            self.window.show()
+            self.entry.setFocus()
+            self._animate_window_opacity(1.0, OPEN_ANIMATION_MS, ease_out_expo)
+
+        def hide(self):
+            if not self.is_open:
+                return
+            self.is_open = False
+
+            def finish():
+                self.window.hide()
+                self.window.setWindowOpacity(1.0)
+
+            self._animate_window_opacity(0.0, CLOSE_ANIMATION_MS, ease_in_expo, finish)
+
+        def _animate_window_opacity(self, target: float, duration_ms: int, easing, on_complete=None):
+            start = self.window.windowOpacity()
+            animation = QtCore.QVariantAnimation(self.window)
+            animation.setDuration(duration_ms)
+            animation.setStartValue(start)
+            animation.setEndValue(target)
+            animation.valueChanged.connect(lambda value: self.window.setWindowOpacity(float(value)))
+            if on_complete is not None:
+                animation.finished.connect(on_complete)
+            animation.finished.connect(animation.deleteLater)
+            animation.setEasingCurve(QtCore.QEasingCurve.Type.OutExpo if easing is ease_out_expo else QtCore.QEasingCurve.Type.InExpo)
+            animation.start(QtCore.QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
+            self._opacity_animation = animation
+
+        def toggle(self):
+            self.hide() if self.is_open else self.show()
+
+        def request_exit(self):
+            if self._exiting:
+                return
+            self._exiting = True
+            self.root.after(0, self.root.destroy)
+
+        def attach_tray_controller(self, tray_controller):
+            self.tray_controller = tray_controller
+
+        def show_message(self, title: str, text: str, *, error: bool = False):
+            box = QtWidgets.QMessageBox(self.window)
+            box.setWindowTitle(title)
+            box.setText(text)
+            box.setIcon(QtWidgets.QMessageBox.Icon.Critical if error else QtWidgets.QMessageBox.Icon.Information)
+            box.exec()
+
+        def shutdown(self):
+            beta_report.write_event("session_shutdown")
+            for job_name in ("_watch_job", "_data_refresh_job", "_search_job", "_premiere_monitor_job", "_render_chunk_job"):
+                job = getattr(self, job_name, None)
+                if job is not None:
+                    self.root.after_cancel(job)
+                    setattr(self, job_name, None)
+            if self._data_observer is not None:
+                try:
+                    self._data_observer.stop()
+                    self._data_observer.join(timeout=1.0)
+                except Exception:
+                    pass
+                self._data_observer = None
+            if self.tray_controller is not None:
+                try:
+                    self.tray_controller.stop()
+                except Exception:
+                    pass
+
+        def run(self):
+            self.root.mainloop()
+
+
+    class QtDebugWindow:
+        def __init__(self, root: QtRootAdapter):
+            self.root = root
+            self.win = None
+            self.is_open = False
+            self._poll_job = None
+
+        def _build(self):
+            self.win = QtWidgets.QWidget()
+            self.win.setWindowTitle("FX.palette - Debug")
+            self.win.setWindowFlags(self.win.windowFlags() | QtCore.Qt.WindowType.WindowStaysOnTopHint)
+            self.win.resize(640, 380)
+            layout = QtWidgets.QVBoxLayout(self.win)
+            layout.setContentsMargins(14, 10, 14, 10)
+            layout.setSpacing(8)
+            self.status_lbl = QtWidgets.QLabel("")
+            self.text = QtWidgets.QPlainTextEdit()
+            self.text.setReadOnly(True)
+            actions = QtWidgets.QHBoxLayout()
+            for label, command in (
+                ("Atualizar efeitos", "exportEffects"),
+                ("Diagnostico", "diagnose"),
+                ("Limpar logs/bridge", "clearBridge"),
+                ("Gerar relatorio beta", "betaReport"),
+            ):
+                button = QtWidgets.QPushButton(label)
+                button.clicked.connect(lambda _checked=False, c=command: self._send(c))
+                actions.addWidget(button)
+            layout.addWidget(self.status_lbl)
+            layout.addWidget(self.text, 1)
+            layout.addLayout(actions)
+            self.win.setStyleSheet(
+                f"QWidget {{ background: {BG}; color: {TEXT}; font-family: 'Segoe UI'; }}"
+                f"QPlainTextEdit {{ background: {BG2}; color: {TEXT_MUTED}; border: 1px solid {BORDER}; }}"
+                f"QPushButton {{ background: {BG2}; color: {TEXT}; border: 1px solid {BORDER}; padding: 6px 10px; }}"
+            )
+
+        def _refresh_log(self):
+            if not self.is_open:
+                return
+            try:
+                if LOG_FILE.exists():
+                    content = LOG_FILE.read_text(encoding="utf-8", errors="replace")
+                    lines = content.splitlines()
+                    self.text.setPlainText("\n".join(lines[-200:]))
+                    self.status_lbl.setText(f"{len(lines)} linhas")
+                else:
+                    self.text.setPlainText("worker.log nao encontrado.")
+                    self.status_lbl.setText("sem arquivo")
+            except Exception as exc:
+                self.status_lbl.setText(f"erro: {exc}")
+            self._poll_job = self.root.after(1000, self._refresh_log)
+
+        def _send(self, command: str):
+            if command == "betaReport":
+                self._create_beta_report()
+                return
+            send_debug_command(command)
+            self.status_lbl.setText(f"-> {command}")
+
+        def _create_beta_report(self):
+            try:
+                report_path = beta_report.build_report(None, EXT_DATA, APP_DIR, reason="manual_debug_window")
+                self.status_lbl.setText("relatorio beta salvo")
+                QtWidgets.QMessageBox.information(self.win, "Relatorio beta salvo", "Envie este arquivo ao Paulo:\n" + str(report_path))
+            except Exception as exc:
+                beta_report.log_exception("Failed to create manual beta report", exc)
+                self.status_lbl.setText(f"erro: {exc}")
+
+        def show(self):
+            if self.is_open:
+                self.win.raise_()
+                self.win.activateWindow()
+                return
+            self.is_open = True
+            self._build()
+            self.win.show()
+            self._refresh_log()
+
+        def hide(self):
+            if not self.is_open:
+                return
+            self.is_open = False
+            if self._poll_job is not None:
+                self.root.after_cancel(self._poll_job)
+                self._poll_job = None
+            if self.win is not None:
+                self.win.close()
+                self.win = None
+
+        def toggle(self):
+            self.hide() if self.is_open else self.show()
+
+
 LOG_FILE = EXT_DATA / "worker.log"
 
 
@@ -3504,18 +4401,28 @@ class SystemTrayController:
                     reason="manual_system_tray",
                 )
                 beta_report.write_event("tray_report_created", {"zip_path": str(report_path)})
-                messagebox.showinfo(
-                    "Relatorio beta salvo",
-                    "Envie este arquivo ao Paulo:\n" + str(report_path),
-                    parent=self.palette.root,
-                )
+                if hasattr(self.palette, "show_message"):
+                    self.palette.show_message("Relatorio beta salvo", "Envie este arquivo ao Paulo:\n" + str(report_path))
+                else:
+                    messagebox.showinfo(
+                        "Relatorio beta salvo",
+                        "Envie este arquivo ao Paulo:\n" + str(report_path),
+                        parent=self.palette.root,
+                    )
             except Exception as exc:
                 beta_report.log_exception("Failed to create tray beta report", exc)
-                messagebox.showerror(
-                    "Erro ao gerar relatorio",
-                    "Nao consegui gerar o relatorio beta. Tente pela janela de debug.",
-                    parent=self.palette.root,
-                )
+                if hasattr(self.palette, "show_message"):
+                    self.palette.show_message(
+                        "Erro ao gerar relatorio",
+                        "Nao consegui gerar o relatorio beta. Tente pela janela de debug.",
+                        error=True,
+                    )
+                else:
+                    messagebox.showerror(
+                        "Erro ao gerar relatorio",
+                        "Nao consegui gerar o relatorio beta. Tente pela janela de debug.",
+                        parent=self.palette.root,
+                    )
 
         self._run_on_tk(create_report)
 
@@ -3645,6 +4552,20 @@ class HotkeyListener:
             self._listener.stop()
 
 
+def create_palette():
+    if HAS_QT:
+        beta_report.write_event("renderer_selected", {"renderer": "qt"})
+        return QtEffectPalette()
+    beta_report.write_event("renderer_selected", {"renderer": "tk"})
+    return EffectPalette()
+
+
+def create_debug_window(palette):
+    if HAS_QT and isinstance(palette, QtEffectPalette):
+        return QtDebugWindow(palette.root)
+    return DebugWindow(palette.root)
+
+
 # â”€â”€â”€ Ponto de entrada â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main():
@@ -3659,8 +4580,8 @@ def main():
 
     beta_report.start_session(APP_DIR, EXT_DATA)
 
-    palette = EffectPalette()
-    debug   = DebugWindow(palette.root)
+    palette = create_palette()
+    debug   = create_debug_window(palette)
     tray    = SystemTrayController(palette, debug)
     hotkey  = HotkeyListener(palette, debug)
     hotkey.start()

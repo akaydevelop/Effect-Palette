@@ -9,7 +9,7 @@ ROOT = Path(SPECPATH).parents[1]
 ENTRYPOINT = ROOT / "EffectPalette.pyw"
 
 hiddenimports = []
-for package in ("pynput", "pystray", "PIL", "pygetwindow", "watchdog"):
+for package in ("pynput", "pystray", "PIL", "pygetwindow", "watchdog", "PySide6"):
     hiddenimports += collect_submodules(package)
 
 
