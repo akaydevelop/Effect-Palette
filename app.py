@@ -43,7 +43,7 @@ try:
     HAS_PYGETWINDOW = True
 except ImportError:
     HAS_PYGETWINDOW = False
-    print("[Aviso] pygetwindow nao instalado - atalho funcionara em qualquer janela")
+    print("[Aviso] pygetwindow nao instalado - usando foco nativo do Windows quando disponivel")
 
 try:
     import pystray
@@ -100,6 +100,17 @@ PREMIERE_PROCESS_NAMES = (
     "Adobe Premiere Pro.exe",
 )
 PROCESSENTRY32W_MAX_PATH = 260
+WM_HOTKEY = 0x0312
+WM_QUIT = 0x0012
+PM_NOREMOVE = 0x0000
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
+MOD_NOREPEAT = 0x4000
+VK_SPACE = 0x20
+VK_D = 0x44
+VK_Q = 0x51
 RESULT_LIMIT = 150
 SEARCH_DEBOUNCE_MS = 20
 RELOAD_COALESCE_MS = 80
@@ -250,6 +261,16 @@ class DataPaths:
     bridge_file: Path = BRIDGE_FILE
     selection_file: Path = SELECTION_FILE
     data_dir: Path = EXT_DATA
+
+
+@dataclass(frozen=True)
+class HotkeySpec:
+    id: int
+    name: str
+    modifiers: int
+    vk: int
+    requires_premiere_focus: bool
+    callback_name: str
 
 
 @dataclass(frozen=True)
@@ -1407,16 +1428,69 @@ def selection_has_infinite_warning_targets(selection: list) -> bool:
     return False
 
 
+def foreground_window_title_native() -> str | None:
+    if not IS_WINDOWS or USER32 is None:
+        return None
+    try:
+        hwnd = USER32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        length = USER32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        USER32.GetWindowTextW(hwnd, buffer, length + 1)
+        return buffer.value
+    except Exception:
+        return None
+
+
+def foreground_window_handle_native() -> int | None:
+    if not IS_WINDOWS or USER32 is None:
+        return None
+    try:
+        hwnd = USER32.GetForegroundWindow()
+        return int(hwnd) if hwnd else None
+    except Exception:
+        return None
+
+
+def window_is_minimized_native(hwnd: int | None) -> bool:
+    if not hwnd or USER32 is None:
+        return False
+    try:
+        return bool(USER32.IsIconic(hwnd))
+    except Exception:
+        return False
+
+
+def activate_window_handle_native(hwnd: int | None):
+    if not hwnd or USER32 is None:
+        return
+    try:
+        if window_is_minimized_native(hwnd):
+            USER32.ShowWindow(hwnd, SW_RESTORE)
+        USER32.BringWindowToTop(hwnd)
+        USER32.SetForegroundWindow(hwnd)
+        USER32.SetActiveWindow(hwnd)
+        USER32.SetFocus(hwnd)
+    except Exception:
+        pass
+
+
 def premiere_is_focused() -> bool:
+    title = foreground_window_title_native()
+    if title is not None:
+        return "Adobe Premiere" in title
     if not HAS_PYGETWINDOW:
-        return True
+        return False
     try:
         active = gw.getActiveWindow()
         if active is None:
             return False
         return "Adobe Premiere" in active.title
     except Exception:
-        return True
+        return False
 
 
 class DataFilesChangeHandler(FileSystemEventHandler):
@@ -3508,6 +3582,8 @@ if HAS_QT:
             self._render_chunk_job = None
             self._render_generation = 0
             self._qt_middle_height = 0
+            self._previous_foreground_hwnd = None
+            self._focus_attempt_job = None
             self.tray_controller = None
             self._exiting = False
             self._build()
@@ -3998,12 +4074,61 @@ if HAS_QT:
             if self.is_open:
                 self._anchor_window_to_pointer()
 
+        def _window_hwnd(self) -> int | None:
+            try:
+                return int(self.window.winId())
+            except Exception:
+                return None
+
+        def _remember_previous_focus(self):
+            previous = foreground_window_handle_native()
+            current = self._window_hwnd()
+            if previous and previous != current:
+                self._previous_foreground_hwnd = previous
+
+        def _activate_window_native(self):
+            activate_window_handle_native(self._window_hwnd())
+
+        def _force_focus_attempt(self, attempt: int = 0, max_attempts: int = OPEN_FOCUS_ATTEMPTS):
+            if not self.is_open:
+                return
+            try:
+                self.window.show()
+                self.window.raise_()
+                self.window.activateWindow()
+                self._activate_window_native()
+                self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
+            except Exception:
+                pass
+            if attempt < max_attempts:
+                self._focus_attempt_job = self.root.after(
+                    35 + (attempt * 35),
+                    lambda a=attempt + 1, m=max_attempts: self._force_focus_attempt(a, m),
+                )
+
+        def _cancel_focus_attempts(self):
+            if self._focus_attempt_job is None:
+                return
+            try:
+                self.root.after_cancel(self._focus_attempt_job)
+            except Exception:
+                pass
+            self._focus_attempt_job = None
+
+        def _restore_previous_focus(self):
+            current = self._window_hwnd()
+            previous = self._previous_foreground_hwnd
+            self._previous_foreground_hwnd = None
+            if previous and previous != current:
+                activate_window_handle_native(previous)
+
         def show(self):
             if self.is_open:
                 self.window.raise_()
                 self.window.activateWindow()
-                self.entry.setFocus()
+                self._force_focus_attempt()
                 return
+            self._remember_previous_focus()
             self.is_open = True
             self.entry.blockSignals(True)
             self.entry.clear()
@@ -4015,17 +4140,19 @@ if HAS_QT:
             self._anchor_window_to_pointer()
             self.window.setWindowOpacity(0.0)
             self.window.show()
-            self.entry.setFocus()
+            self._force_focus_attempt()
             self._animate_window_opacity(1.0, OPEN_ANIMATION_MS, ease_out_expo)
 
         def hide(self):
             if not self.is_open:
                 return
             self.is_open = False
+            self._cancel_focus_attempts()
 
             def finish():
                 self.window.hide()
                 self.window.setWindowOpacity(1.0)
+                self._restore_previous_focus()
 
             self._animate_window_opacity(0.0, CLOSE_ANIMATION_MS, ease_in_expo, finish)
 
@@ -4064,7 +4191,7 @@ if HAS_QT:
 
         def shutdown(self):
             beta_report.write_event("session_shutdown")
-            for job_name in ("_watch_job", "_data_refresh_job", "_search_job", "_premiere_monitor_job", "_render_chunk_job"):
+            for job_name in ("_watch_job", "_data_refresh_job", "_search_job", "_premiere_monitor_job", "_render_chunk_job", "_focus_attempt_job"):
                 job = getattr(self, job_name, None)
                 if job is not None:
                     self.root.after_cancel(job)
@@ -4488,68 +4615,206 @@ class SystemTrayController:
 class HotkeyListener:
     def __init__(self, palette: EffectPalette, debug: DebugWindow):
         self.palette = palette
-        self.debug   = debug
-        self.pressed = set()
-        self._toggle_combo_active = False
-        self._debug_combo_active = False
-        self._quit_combo_active = False
+        self.debug = debug
+        self._specs = self._build_specs()
+        self._specs_by_id = {spec.id: spec for spec in self._specs}
+        self._thread = None
+        self._thread_id = None
+        self._ready_event = threading.Event()
+        self._registered_hotkey_ids: set[int] = set()
+        self._fallback_hotkeys = None
+        self._stopping = False
+        self._native_backend_unavailable = False
 
-    def _combo_state(self):
-        ctrl = keyboard.Key.ctrl_l in self.pressed or keyboard.Key.ctrl_r in self.pressed
-        space = keyboard.Key.space in self.pressed
-        q = keyboard.KeyCode.from_char('\x11') in self.pressed  # Ctrl+Q
-        try:
-            d = keyboard.KeyCode.from_char('d') in self.pressed or \
-                keyboard.KeyCode.from_char('D') in self.pressed or \
-                keyboard.KeyCode.from_char('\x04') in self.pressed
-        except Exception:
-            d = False
-        return ctrl, space, d, q
+    def _build_specs(self) -> list[HotkeySpec]:
+        specs = [
+            HotkeySpec(
+                id=1,
+                name="toggle_palette",
+                modifiers=MOD_CONTROL | MOD_NOREPEAT,
+                vk=VK_SPACE,
+                requires_premiere_focus=True,
+                callback_name="toggle_palette",
+            ),
+            HotkeySpec(
+                id=3,
+                name="quit",
+                modifiers=MOD_CONTROL | MOD_NOREPEAT,
+                vk=VK_Q,
+                requires_premiere_focus=False,
+                callback_name="quit",
+            ),
+        ]
+        if ENABLE_DEBUG_HOTKEY:
+            specs.insert(
+                1,
+                HotkeySpec(
+                    id=2,
+                    name="toggle_debug",
+                    modifiers=MOD_CONTROL | MOD_NOREPEAT,
+                    vk=VK_D,
+                    requires_premiere_focus=False,
+                    callback_name="toggle_debug",
+                ),
+            )
+        return specs
 
-    def _refresh_combo_guards(self):
-        ctrl, space, d, q = self._combo_state()
-        if not (ctrl and space):
-            self._toggle_combo_active = False
-        if not (ctrl and d):
-            self._debug_combo_active = False
-        if not (ctrl and q):
-            self._quit_combo_active = False
+    def _dispatch_hotkey(self, spec: HotkeySpec):
+        beta_report.write_event("hotkey_triggered", {"name": spec.name})
+        if spec.requires_premiere_focus and not premiere_is_focused():
+            beta_report.write_event("hotkey_ignored_focus", {"name": spec.name})
+            return
 
-    def _on_press(self, key):
-        self.pressed.add(key)
-        ctrl, space, d, q = self._combo_state()
-
-        if ctrl and space and not self._toggle_combo_active:
-            self._toggle_combo_active = True
-            if premiere_is_focused():
-                self.palette.root.after(0, self.palette.toggle)
-
-        if ENABLE_DEBUG_HOTKEY and ctrl and d and not self._debug_combo_active:
-            self._debug_combo_active = True
-            self.palette.root.after(0, self.debug.toggle)
-
-        if ctrl and q and not self._quit_combo_active:
-            self._quit_combo_active = True
+        if spec.callback_name == "toggle_palette":
+            self.palette.toggle()
+        elif spec.callback_name == "toggle_debug":
+            self.debug.toggle()
+        elif spec.callback_name == "quit":
             print("[App] Encerrando via Ctrl+Q...")
-            self.palette.root.after(0, self.palette.request_exit)
+            self.palette.request_exit()
 
-    def _on_release(self, key):
-        self.pressed.discard(key)
-        self._refresh_combo_guards()
+    def _schedule_dispatch(self, spec: HotkeySpec):
+        try:
+            if self.palette.root and self.palette.root.winfo_exists():
+                self.palette.root.after(0, lambda spec=spec: self._dispatch_hotkey(spec))
+        except Exception as exc:
+            beta_report.log_exception("Hotkey dispatch scheduling failed", exc)
 
-    def start(self):
+    def _hotkey_error_text(self, error_code: int) -> str:
+        if not error_code:
+            return "erro desconhecido"
+        try:
+            return f"{error_code}: {ctypes.WinError(error_code)}"
+        except Exception:
+            return str(error_code)
+
+    def _register_native_hotkey(self, user32, spec: HotkeySpec) -> bool:
+        if user32.RegisterHotKey(None, spec.id, spec.modifiers, spec.vk):
+            self._registered_hotkey_ids.add(spec.id)
+            beta_report.write_event("hotkey_registered", {"name": spec.name})
+            return True
+
+        error_code = ctypes.get_last_error()
+        error_text = self._hotkey_error_text(error_code)
+        beta_report.write_event("hotkey_register_failed", {"name": spec.name, "error": error_text})
+        if spec.name == "toggle_palette":
+            print(f"[Hotkey] Ctrl+Espaco nao registrado: {error_text}")
+        else:
+            print(f"[Hotkey] {spec.name} nao registrado: {error_text}")
+        return False
+
+    def _run_native_hotkey_loop(self):
+        user32 = None
+        try:
+            self._native_backend_unavailable = False
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+            user32.RegisterHotKey.restype = wintypes.BOOL
+            user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.UnregisterHotKey.restype = wintypes.BOOL
+            user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+            user32.GetMessageW.restype = wintypes.BOOL
+            user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
+            user32.PeekMessageW.restype = wintypes.BOOL
+            kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+            self._thread_id = int(kernel32.GetCurrentThreadId())
+            msg = wintypes.MSG()
+            user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_NOREMOVE)
+
+            for spec in self._specs:
+                self._register_native_hotkey(user32, spec)
+
+            self._ready_event.set()
+            if 1 in self._registered_hotkey_ids:
+                print("[Hotkey] Ctrl+Espaco ativo via RegisterHotKey")
+            beta_report.write_event("hotkey_backend_selected", {"backend": "native_windows"})
+
+            while not self._stopping:
+                result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if result == 0:
+                    break
+                if result == -1:
+                    beta_report.write_event("hotkey_message_loop_failed", {"error": self._hotkey_error_text(ctypes.get_last_error())})
+                    break
+                if msg.message == WM_HOTKEY:
+                    spec = self._specs_by_id.get(int(msg.wParam))
+                    if spec is not None:
+                        self._schedule_dispatch(spec)
+        except Exception as exc:
+            self._native_backend_unavailable = True
+            beta_report.log_exception("Native hotkey thread failed", exc)
+            self._ready_event.set()
+        finally:
+            if user32 is not None:
+                for hotkey_id in list(self._registered_hotkey_ids):
+                    try:
+                        user32.UnregisterHotKey(None, hotkey_id)
+                    except Exception:
+                        pass
+                self._registered_hotkey_ids.clear()
+            self._thread_id = None
+
+    def _start_native_backend(self):
+        self._ready_event.clear()
+        self._stopping = False
+        self._thread = threading.Thread(target=self._run_native_hotkey_loop, name="NativeHotkeyListener", daemon=True)
+        self._thread.start()
+        self._ready_event.wait(timeout=1.0)
+        if self._native_backend_unavailable:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+            self._start_fallback_backend()
+
+    def _fallback_bindings(self):
+        bindings = {
+            "<ctrl>+<space>": lambda: self._schedule_dispatch(self._specs_by_id[1]),
+            "<ctrl>+q": lambda: self._schedule_dispatch(self._specs_by_id[3]),
+        }
+        if ENABLE_DEBUG_HOTKEY and 2 in self._specs_by_id:
+            bindings["<ctrl>+d"] = lambda: self._schedule_dispatch(self._specs_by_id[2])
+        return bindings
+
+    def _start_fallback_backend(self):
         if not HAS_PYNPUT:
             print("[Aviso] pynput nao disponivel - hotkeys globais desativadas")
             return
-        self._listener = keyboard.Listener(
-            on_press=self._on_press, on_release=self._on_release)
-        self._listener.daemon = True
-        self._listener.start()
-        print("[Hotkey] Ctrl+Espaco ativo")
+        try:
+            beta_report.write_event("hotkey_backend_selected", {"backend": "pynput_fallback"})
+            self._fallback_hotkeys = keyboard.GlobalHotKeys(self._fallback_bindings())
+            self._fallback_hotkeys.start()
+            print("[Hotkey] fallback pynput ativo")
+        except Exception as exc:
+            beta_report.log_exception("pynput fallback hotkey backend failed", exc)
+
+    def start(self):
+        if IS_WINDOWS:
+            self._start_native_backend()
+            return
+        self._start_fallback_backend()
 
     def stop(self):
-        if hasattr(self, "_listener"):
-            self._listener.stop()
+        self._stopping = True
+        if self._thread is not None:
+            thread_id = self._thread_id
+            if thread_id is not None:
+                try:
+                    user32 = ctypes.WinDLL("user32", use_last_error=True)
+                    user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+                    user32.PostThreadMessageW.restype = wintypes.BOOL
+                    user32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
+                except Exception as exc:
+                    beta_report.log_exception("Failed to stop native hotkey thread", exc)
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+        if self._fallback_hotkeys is not None:
+            try:
+                self._fallback_hotkeys.stop()
+            except Exception:
+                pass
+            self._fallback_hotkeys = None
 
 
 def create_palette():
