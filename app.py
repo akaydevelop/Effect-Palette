@@ -4395,8 +4395,8 @@ if HAS_QT:
 
         def _finish_successful_apply(self):
             self._apply_close_job = None
-            self._apply_busy = False
             self._apply_finishing = False
+            self._set_apply_busy(False)
             self.hide()
 
         def _poll_apply_status(self):
