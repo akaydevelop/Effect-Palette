@@ -5209,7 +5209,10 @@ class HotkeyListener:
 
 
 def create_palette():
-    if HAS_QT:
+    # Qt UI is opt-in: set EFFECT_PALETTE_UI=qt to use it. Default stays
+    # tkinter so installing PySide6 does not silently switch renderers.
+    want_qt = os.environ.get("EFFECT_PALETTE_UI", "tk").strip().lower() == "qt"
+    if want_qt and HAS_QT:
         beta_report.write_event("renderer_selected", {"renderer": "qt"})
         return QtEffectPalette()
     beta_report.write_event("renderer_selected", {"renderer": "tk"})
