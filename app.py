@@ -23,11 +23,21 @@ from typing import Callable
 import beta_report
 
 try:
-    from pynput import keyboard
+    from pynput import keyboard, mouse as pynput_mouse
     HAS_PYNPUT = True
 except Exception:
     keyboard = None
+    pynput_mouse = None
     HAS_PYNPUT = False
+
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+    HAS_RAPIDFUZZ = True
+except ImportError:
+    _rf_fuzz = None
+    HAS_RAPIDFUZZ = False
+
+FUZZY_THRESHOLD = 65
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -46,13 +56,17 @@ except ImportError:
     print("[Aviso] pygetwindow nao instalado - usando foco nativo do Windows quando disponivel")
 
 try:
+    from PIL import Image, ImageDraw, ImageTk
+    HAS_PIL = True
+except ImportError:
+    Image = ImageDraw = ImageTk = None
+    HAS_PIL = False
+
+try:
     import pystray
-    from PIL import Image, ImageDraw
-    HAS_TRAY = True
+    HAS_TRAY = HAS_PIL
 except Exception:
     pystray = None
-    Image = None
-    ImageDraw = None
     HAS_TRAY = False
 
 try:
@@ -117,8 +131,8 @@ RELOAD_COALESCE_MS = 80
 WIDTH_MEASURE_SAMPLE = 12
 RESULTS_COLLAPSED_HEIGHT = 0
 RESULTS_MESSAGE_HEIGHT = 54
-RESULTS_EXPANDED_HEIGHT = 248
-OPEN_ANIMATION_MS = 50
+RESULTS_EXPANDED_HEIGHT = 394
+OPEN_ANIMATION_MS = 140
 CLOSE_ANIMATION_MS = 110
 STATE_ANIMATION_MS = 100
 PILL_ANIMATION_MS = 120
@@ -139,7 +153,7 @@ APPLY_STATUS_POLL_MS = 60
 APPLY_STATUS_TIMEOUT_MS = 5000
 APPLY_SUCCESS_CLOSE_DELAY_MS = 300
 HEADER_PAD_X = 14
-HEADER_PAD_Y = 8
+HEADER_PAD_Y = 10
 SEARCH_PAD_X = 14
 SEARCH_PAD_Y = 10
 SEARCH_ICON_PAD_Y = 10
@@ -182,31 +196,32 @@ GENERIC_ITEMS = [
     {"name": "Transparent Video", "category": "Favoritos", "type": "generic_item", "genericKey": "transparent_video"},
 ]
 
-BG = "#0F0F11"
-BG2 = "#1A1A1F"
+BG = "#0D0C14"
+BG2 = "#111019"
 BORDER = "#2A2A35"
 TEXT = "#E8E8F0"
 TEXT_MUTED = "#88889B"
-ACCENT = "#5B6BF8"
+ACCENT = "#7278F0"
+MATCH_HIGHLIGHT = "#A0AAFF"
 SEL_BG = "#1E2040"
 GREEN = "#3DD68C"
 ORANGE = "#F5A623"
 OFFLINE = "#7E8698"
 SURFACE = "#151520"
-SURFACE_ALT = "#191928"
+SURFACE_ALT = "#13122B"
 SURFACE_HOVER = "#202033"
 SURFACE_SELECTED = "#2A2C44"
 SURFACE_FAVORITE = "#1C1A2C"
 SURFACE_FAVORITE_HOVER = "#232038"
 SURFACE_FAVORITE_SELECTED = "#2E2A45"
-ROW_BORDER = "#232335"
-ROW_BORDER_ACTIVE = "#5B6BF8"
+ROW_BORDER = "#27254D"
+ROW_BORDER_ACTIVE = "#7278F0"
 ICON_BG = "#2A2742"
 ICON_BG_FAVORITE = "#4E3A89"
 ICON_FG = "#BFC6F3"
-TYPE_BG = "#212033"
+TYPE_BG = "#1E1E35"
 TYPE_FG = "#AAA8BE"
-CHIP_BG = "#181826"
+CHIP_BG = "#17172E"
 CHIP_HOVER = "#25233C"
 CHIP_ACTIVE = "#4752C8"
 CHIP_BORDER = "#2E2C40"
@@ -287,8 +302,15 @@ class IndexedItem:
 
 
 @dataclass(frozen=True)
+class MatchInfo:
+    score: float
+    ranges: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
 class SearchResultSet:
     items: tuple[dict, ...]
+    match_infos: tuple[MatchInfo, ...]
     total_count: int
     visible_count: int
     query: str
@@ -312,8 +334,9 @@ class ResultRowWidgets:
     background_canvas: tk.Canvas
     background_id: int
     accent_id: int
+    icon_bg_id: int
     icon_label: tk.Label
-    title_label: tk.Label
+    title_text: tk.Text
     subtitle_label: tk.Label
     type_canvas: tk.Canvas
     type_bg_id: int
@@ -338,9 +361,9 @@ class IconButtonWidgets:
 
 @dataclass(frozen=True)
 class PaletteLayoutMetrics:
-    row_height: int = 50
-    row_gap: int = 4
-    row_radius: int = 14
+    row_height: int = 52
+    row_gap: int = 3
+    row_radius: int = 12
     row_pad_x: int = 8
     row_pad_y: int = 6
     icon_size: int = 22
@@ -350,7 +373,7 @@ class PaletteLayoutMetrics:
     chip_radius: int = 13
     chip_pad_x: int = 12
     results_outer_pad: int = 6
-    max_visible_rows: int = 5
+    max_visible_rows: int = 7
 
 
 def compute_results_height_for_count(count: int, metrics: PaletteLayoutMetrics | None = None) -> int:
@@ -575,6 +598,26 @@ def freeze_id_lists(mapping: dict[str, list[int]]) -> dict[str, tuple[int, ...]]
     return {key: tuple(values) for key, values in mapping.items()}
 
 
+def _set_title_with_highlights(text_widget: "tk.Text", title: str, ranges: tuple[tuple[int, int], ...]):
+    text_widget.configure(state="normal")
+    text_widget.delete("1.0", "end")
+    if not ranges:
+        text_widget.insert("end", title)
+    else:
+        pos = 0
+        for start, end in sorted(ranges):
+            start = max(pos, min(start, len(title)))
+            end = max(start, min(end, len(title)))
+            if start > pos:
+                text_widget.insert("end", title[pos:start])
+            if end > start:
+                text_widget.insert("end", title[start:end], "match")
+            pos = end
+        if pos < len(title):
+            text_widget.insert("end", title[pos:])
+    text_widget.configure(state="disabled")
+
+
 def hex_to_rgb(color: str) -> tuple[int, int, int]:
     color = color.lstrip("#")
     return tuple(int(color[idx:idx + 2], 16) for idx in (0, 2, 4))
@@ -624,27 +667,31 @@ def get_row_visual_tokens(accent_kind: str, *, selected: bool, hovered: bool) ->
         border = blend_colors(ROW_BORDER, pastel, 0.75)
         badge_bg = blend_colors(TYPE_BG, pastel, 0.42)
         icon_fg = blend_colors(ICON_FG, pastel, 0.50)
+        icon_bg = blend_colors(ICON_BG, pastel, 0.35)
         subtitle_fg = blend_colors(TEXT_MUTED, "#FFFFFF", 0.42)
     elif hovered:
         bg = blend_colors(SURFACE_ALT, pastel, 0.16)
         border = blend_colors(ROW_BORDER, pastel, 0.54)
         badge_bg = blend_colors(TYPE_BG, pastel, 0.32)
         icon_fg = blend_colors(ICON_FG, pastel, 0.34)
+        icon_bg = blend_colors(ICON_BG, pastel, 0.25)
         subtitle_fg = blend_colors(TEXT_MUTED, "#FFFFFF", 0.28)
     else:
         bg = blend_colors(SURFACE_ALT, pastel, 0.10)
         border = blend_colors(ROW_BORDER, pastel, 0.34)
         badge_bg = blend_colors(TYPE_BG, pastel, 0.24)
         icon_fg = blend_colors(ICON_FG, pastel, 0.20)
+        icon_bg = blend_colors(ICON_BG, pastel, 0.15)
         subtitle_fg = TEXT_MUTED
     return {
         "bg": bg,
         "accent": pastel,
         "icon_fg": icon_fg,
+        "icon_bg": icon_bg,
         "border": border,
         "subtitle_fg": subtitle_fg,
         "type_bg": badge_bg,
-        "type_fg": TEXT,
+        "type_fg": blend_colors(TYPE_FG, pastel, 0.65),
         "title_fg": TEXT,
     }
 
@@ -721,6 +768,36 @@ def draw_rounded_rect(canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, rad
 
 def update_rounded_rect(canvas: tk.Canvas, item_id: int, x1: int, y1: int, x2: int, y2: int, radius: int):
     canvas.coords(item_id, *rounded_rect_points(x1, y1, x2, y2, radius))
+
+
+class RoundedImageCache:
+    """Generates PIL rounded-rect images with true circular arcs via 3× supersampling + LANCZOS downscale."""
+    _SCALE = 3
+
+    def __init__(self):
+        self._cache: dict = {}
+
+    def get(self, w: int, h: int, radius: int, fill: str,
+            outline: str = "", outline_width: int = 0) -> "ImageTk.PhotoImage":
+        w, h = max(1, w), max(1, h)
+        key = (w, h, radius, fill, outline, outline_width)
+        if key not in self._cache:
+            s = self._SCALE
+            img = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.rounded_rectangle(
+                [0, 0, w * s - 1, h * s - 1],
+                radius=radius * s,
+                fill=fill,
+                outline=outline or None,
+                width=outline_width * s if outline_width else 0,
+            )
+            img = img.resize((w, h), Image.LANCZOS)
+            self._cache[key] = ImageTk.PhotoImage(img)
+        return self._cache[key]
+
+
+_rr_cache: "RoundedImageCache | None" = RoundedImageCache() if HAS_PIL else None
 
 
 def get_icon_glyph(icon_kind: str, *, ascii_only: bool = False) -> str:
@@ -1122,38 +1199,47 @@ class EffectsLoader:
         snapshot = self.snapshot
         normalized_query = normalize_search_text(query)
         if not normalized_query:
-            return SearchResultSet(items=(), total_count=0, visible_count=0, query="")
+            return SearchResultSet(items=(), match_infos=(), total_count=0, visible_count=0, query="")
 
         allowed_types = set(type_filters) if type_filters else None
         prefix_key = normalized_query[:4]
-        seen: set[int] = set()
-        ranked_ids: list[int] = []
-        sort_key = lambda idx: (snapshot.indexed_items[idx].normalized_name, snapshot.indexed_items[idx].load_order)
+        score_map: dict[int, tuple[float, tuple[tuple[int, int], ...]]] = {}
 
-        def allowed(idx: int) -> bool:
+        def is_allowed(idx: int) -> bool:
             if allowed_types is None:
                 return True
             return snapshot.indexed_items[idx].item_type in allowed_types
 
-        def append_group(candidate_ids, predicate):
-            group = []
-            for idx in candidate_ids:
-                if idx in seen or not allowed(idx):
-                    continue
-                indexed = snapshot.indexed_items[idx]
-                if not predicate(indexed):
-                    continue
-                group.append(idx)
-            if not group:
-                return
-            group.sort(key=sort_key)
-            seen.update(group)
-            ranked_ids.extend(group)
+        def record(idx: int, score: float, ranges: tuple[tuple[int, int], ...]):
+            if idx not in score_map:
+                score_map[idx] = (score, ranges)
 
-        append_group(snapshot.exact_name_map.get(normalized_query, ()), lambda item: item.normalized_name == normalized_query)
-        append_group(snapshot.prefix_map.get(prefix_key, ()), lambda item: item.normalized_name.startswith(normalized_query))
-        append_group(snapshot.token_prefix_map.get(prefix_key, ()), lambda item: any(token.startswith(normalized_query) for token in item.tokens))
+        # Tier 1 — exact name (1000)
+        for idx in snapshot.exact_name_map.get(normalized_query, ()):
+            if is_allowed(idx):
+                name = snapshot.indexed_items[idx].normalized_name
+                record(idx, 1000.0, ((0, len(name)),))
 
+        # Tier 2 — full-name prefix (900)
+        for idx in snapshot.prefix_map.get(prefix_key, ()):
+            if not is_allowed(idx):
+                continue
+            if snapshot.indexed_items[idx].normalized_name.startswith(normalized_query):
+                record(idx, 900.0, ((0, len(normalized_query)),))
+
+        # Tier 3 — token prefix (800)
+        for idx in snapshot.token_prefix_map.get(prefix_key, ()):
+            if not is_allowed(idx):
+                continue
+            item = snapshot.indexed_items[idx]
+            for token in item.tokens:
+                if token.startswith(normalized_query):
+                    pos = item.normalized_name.find(token)
+                    ranges = ((pos, pos + len(normalized_query)),) if pos >= 0 else ()
+                    record(idx, 800.0, ranges)
+                    break
+
+        # Tier 4 — substring / trigram (700)
         if len(normalized_query) >= 3:
             trigram_groups = []
             for trigram in set(make_trigrams(normalized_query)):
@@ -1166,10 +1252,43 @@ class EffectsLoader:
         else:
             contains_candidates = list(range(len(snapshot.indexed_items)))
 
-        append_group(contains_candidates, lambda item: normalized_query in item.normalized_name)
+        for idx in contains_candidates:
+            if not is_allowed(idx):
+                continue
+            item = snapshot.indexed_items[idx]
+            pos = item.normalized_name.find(normalized_query)
+            if pos >= 0:
+                record(idx, 700.0, ((pos, pos + len(normalized_query)),))
+
+        # Tier 5 — fuzzy (0–699), only when rapidfuzz is available
+        if HAS_RAPIDFUZZ and len(normalized_query) >= 2:
+            for idx in range(len(snapshot.indexed_items)):
+                if idx in score_map or not is_allowed(idx):
+                    continue
+                item = snapshot.indexed_items[idx]
+                raw_score = _rf_fuzz.WRatio(normalized_query, item.normalized_name)
+                if raw_score < FUZZY_THRESHOLD:
+                    continue
+                try:
+                    alignment = _rf_fuzz.partial_ratio_alignment(normalized_query, item.normalized_name)
+                    ranges = ((alignment.dest_start, alignment.dest_end),)
+                except Exception:
+                    ranges = ()
+                record(idx, raw_score * (699.0 / 100.0), ranges)
+
+        def sort_key(idx: int):
+            item = snapshot.indexed_items[idx]
+            return (-score_map[idx][0], len(item.normalized_name), item.load_order)
+
+        ranked_ids = sorted(score_map.keys(), key=sort_key)
         visible_ids = ranked_ids[:limit]
+        visible_match_infos = tuple(
+            MatchInfo(score=score_map[idx][0], ranges=score_map[idx][1])
+            for idx in visible_ids
+        )
         return SearchResultSet(
             items=tuple(snapshot.indexed_items[idx].payload for idx in visible_ids),
+            match_infos=visible_match_infos,
             total_count=len(ranked_ids),
             visible_count=len(visible_ids),
             query=normalized_query,
@@ -1572,6 +1691,7 @@ class PaletteResultsController:
         self.row_widgets: list[ResultRowWidgets] = []
         self.row_models: list[ResultRowModel] = []
         self.row_keys: list[str] = []
+        self.match_infos: list[MatchInfo | None] = []
         self._previous_row_keys: list[str] = []
         self._previous_selected_key: str | None = None
         self._render_window_size = self.metrics.max_visible_rows + (RESULTS_RENDER_OVERSCAN * 2) + 1
@@ -1592,6 +1712,7 @@ class PaletteResultsController:
         self._previous_selected_key = self.selected_key()
         self.row_models = []
         self.row_keys = []
+        self.match_infos = []
         self.selected_index = -1
         self.hover_index = -1
         for row in self.row_widgets:
@@ -1600,10 +1721,11 @@ class PaletteResultsController:
         self.canvas.configure(scrollregion=(0, 0, 0, 0))
         self.canvas.yview_moveto(0.0)
 
-    def render(self, row_models: list[ResultRowModel]):
+    def render(self, row_models: list[ResultRowModel], match_infos: list["MatchInfo | None"] | None = None):
         previous_selected_key = self.selected_key()
         self.row_models = list(row_models)
         self.row_keys = [self.palette._result_row_key(model.payload) for model in self.row_models]
+        self.match_infos = list(match_infos) if match_infos is not None else [None] * len(self.row_models)
         self.hover_index = -1
         if self.row_keys:
             if previous_selected_key in self.row_keys:
@@ -1728,7 +1850,8 @@ class PaletteResultsController:
             widgets.index = actual_index
             if force or should_reconfigure_row(previous_key, previous_model, row_key, model):
                 widgets.model = model
-                self._render_row_content(widgets)
+                match_info = self.match_infos[actual_index] if actual_index < len(self.match_infos) else None
+                self._render_row_content(widgets, match_info)
             else:
                 widgets.model = model
             y = self.metrics.results_outer_pad + (actual_index * self._row_step())
@@ -1760,33 +1883,38 @@ class PaletteResultsController:
             relief="flat",
         )
         background_canvas.place(x=0, y=0, relwidth=1, relheight=1)
-        background_id = draw_rounded_rect(
-            background_canvas,
-            1,
-            1,
-            10,
-            self.metrics.row_height - 1,
-            self.metrics.row_radius,
-            fill=SURFACE_ALT,
-            outline=ROW_BORDER,
-            width=1,
-        )
+        if _rr_cache:
+            _bg_ph = _rr_cache.get(9, self.metrics.row_height - 2, self.metrics.row_radius, SURFACE_ALT, ROW_BORDER, 1)
+            background_id = background_canvas.create_image(1, 1, image=_bg_ph, anchor="nw")
+        else:
+            background_id = draw_rounded_rect(
+                background_canvas, 1, 1, 10, self.metrics.row_height - 1,
+                self.metrics.row_radius, fill=SURFACE_ALT, outline=ROW_BORDER, width=1,
+            )
         accent_id = draw_rounded_rect(
             background_canvas,
-            8,
-            7,
-            14,
-            self.metrics.row_height - 7,
+            1,
+            self.metrics.row_height // 4,
             4,
+            self.metrics.row_height * 3 // 4,
+            2,
             fill=FILTER_PALETTE["Video"],
             outline="",
             state="hidden",
         )
+        icon_cy = self.metrics.row_height // 2
+        if _rr_cache:
+            _icon_ph = _rr_cache.get(26, 26, 6, ICON_BG)
+            icon_bg_id = background_canvas.create_image(8, icon_cy - 13, image=_icon_ph, anchor="nw")
+        else:
+            icon_bg_id = draw_rounded_rect(
+                background_canvas, 8, icon_cy - 13, 34, icon_cy + 13, 6, fill=ICON_BG, outline="",
+            )
         icon_label = tk.Label(
             frame,
             text="",
             font=self.palette.row_icon_font,
-            bg=SURFACE_ALT,
+            bg=ICON_BG,
             fg=ICON_FG,
             width=ROW_ICON_WIDTH,
             bd=0,
@@ -1795,19 +1923,24 @@ class PaletteResultsController:
             padx=0,
             pady=0,
         )
-        title_label = tk.Label(
+        title_text = tk.Text(
             frame,
-            text="",
+            height=1,
             font=self.palette.row_title_font,
             bg=SURFACE_ALT,
             fg=TEXT,
-            anchor="w",
             bd=0,
             relief="flat",
             highlightthickness=0,
             padx=0,
             pady=0,
+            state="disabled",
+            cursor="hand2",
+            wrap="none",
+            exportselection=False,
+            takefocus=False,
         )
+        title_text.tag_configure("match", foreground=MATCH_HIGHLIGHT)
         subtitle_label = tk.Label(
             frame,
             text="",
@@ -1828,16 +1961,14 @@ class PaletteResultsController:
             bd=0,
             relief="flat",
         )
-        type_bg_id = draw_rounded_rect(
-            type_canvas,
-            0,
-            0,
-            10,
-            self.metrics.type_badge_height,
-            self.metrics.type_badge_radius,
-            fill=TYPE_BG,
-            outline="",
-        )
+        if _rr_cache:
+            _badge_ph = _rr_cache.get(10, self.metrics.type_badge_height - 1, self.metrics.type_badge_radius, TYPE_BG)
+            type_bg_id = type_canvas.create_image(0, 0, image=_badge_ph, anchor="nw")
+        else:
+            type_bg_id = draw_rounded_rect(
+                type_canvas, 0, 0, 10, self.metrics.type_badge_height,
+                self.metrics.type_badge_radius, fill=TYPE_BG, outline="",
+            )
         type_text_id = type_canvas.create_text(
             0,
             self.metrics.type_badge_height // 2,
@@ -1852,8 +1983,9 @@ class PaletteResultsController:
             background_canvas=background_canvas,
             background_id=background_id,
             accent_id=accent_id,
+            icon_bg_id=icon_bg_id,
             icon_label=icon_label,
-            title_label=title_label,
+            title_text=title_text,
             subtitle_label=subtitle_label,
             type_canvas=type_canvas,
             type_bg_id=type_bg_id,
@@ -1863,7 +1995,7 @@ class PaletteResultsController:
         self._bind_row_widget(frame, row)
         self._bind_row_widget(background_canvas, row)
         self._bind_row_widget(icon_label, row)
-        self._bind_row_widget(title_label, row)
+        self._bind_row_widget(title_text, row)
         self._bind_row_widget(subtitle_label, row)
         self._bind_row_widget(type_canvas, row)
         return row
@@ -1875,10 +2007,10 @@ class PaletteResultsController:
         widget.bind("<Double-Button-1>", lambda e, r=row: self._on_row_double_click(r.index))
         widget.bind("<MouseWheel>", self._on_mouse_wheel)
 
-    def _render_row_content(self, row: ResultRowWidgets):
+    def _render_row_content(self, row: ResultRowWidgets, match_info: "MatchInfo | None" = None):
         model = row.model
         row.icon_label.config(text=get_icon_glyph(model.icon_kind))
-        row.title_label.config(text=model.title)
+        _set_title_with_highlights(row.title_text, model.title, match_info.ranges if match_info else ())
         row.subtitle_label.config(text=model.subtitle)
         row.type_canvas.itemconfigure(row.type_text_id, text=model.type_label)
         self._layout_row_widget(row)
@@ -1887,52 +2019,63 @@ class PaletteResultsController:
         row_width = width or row.frame.winfo_width() or int(row.frame.cget("width") or 0) or 1
         row_height = self.metrics.row_height
         row.background_canvas.configure(width=row_width, height=row_height)
-        update_rounded_rect(
-            row.background_canvas,
-            row.background_id,
-            1,
-            1,
-            max(2, row_width - 1),
-            row_height - 1,
-            self.metrics.row_radius,
-        )
         badge_text = row.model.type_label or ""
         badge_width = max(52, self.palette.row_type_font.measure(badge_text) + (ROW_BADGE_PAD_X * 2))
         badge_height = self.metrics.type_badge_height
         row.type_canvas.configure(width=badge_width, height=badge_height)
-        update_rounded_rect(
-            row.type_canvas,
-            row.type_bg_id,
-            0,
-            0,
-            max(2, badge_width - 1),
-            badge_height - 1,
-            self.metrics.type_badge_radius,
-        )
+        if _rr_cache:
+            row._bg_w = row_width
+            row._badge_w = badge_width
+            # Placeholder images at correct dimensions; _apply_row_state sets final colors
+            _bg_ph = _rr_cache.get(max(2, row_width - 2), row_height - 2, self.metrics.row_radius, SURFACE_ALT, ROW_BORDER, 1)
+            row.background_canvas.itemconfigure(row.background_id, image=_bg_ph)
+            _badge_ph = _rr_cache.get(max(2, badge_width - 1), badge_height - 1, self.metrics.type_badge_radius, TYPE_BG)
+            row.type_canvas.itemconfigure(row.type_bg_id, image=_badge_ph)
+        else:
+            update_rounded_rect(
+                row.background_canvas, row.background_id,
+                1, 1, max(2, row_width - 1), row_height - 1, self.metrics.row_radius,
+            )
+            update_rounded_rect(
+                row.type_canvas, row.type_bg_id,
+                0, 0, max(2, badge_width - 1), badge_height - 1, self.metrics.type_badge_radius,
+            )
         row.type_canvas.coords(row.type_text_id, badge_width / 2, badge_height / 2)
         row.type_canvas.itemconfigure(row.type_text_id, anchor="center")
 
         badge_x = row_width - badge_width - 10
         row.type_canvas.place(x=badge_x, y=(row_height - badge_height) // 2, width=badge_width, height=badge_height)
-        row.icon_label.place(x=28, y=row_height // 2, anchor="center")
-        row.title_label.place(x=48, y=14, anchor="w")
-        row.subtitle_label.place(x=48, y=34, anchor="w")
+        row.icon_label.place(x=21, y=row_height // 2, anchor="center")
+        title_width = max(1, badge_x - 48 - 12)
+        row.title_text.place(x=48, y=14, anchor="w", width=title_width)
+        row.subtitle_label.place(x=48, y=36, anchor="w")
 
     def _apply_row_state(self, row: ResultRowWidgets):
         model = row.model
         selected = row.index == self.selected_index
         hovered = row.index == self.hover_index
         colors = get_row_visual_tokens(model.accent_kind, selected=selected, hovered=hovered)
-        row.background_canvas.itemconfigure(
-            row.background_id,
-            fill=colors["bg"],
-            outline=colors["border"],
-        )
-        row.icon_label.config(bg=colors["bg"], fg=colors["icon_fg"])
-        row.title_label.config(bg=colors["bg"], fg=colors["title_fg"])
+        if _rr_cache:
+            bg_w = getattr(row, "_bg_w", 10)
+            badge_w = getattr(row, "_badge_w", 52)
+            row_h = self.metrics.row_height
+            badge_h = self.metrics.type_badge_height
+            _bg_ph = _rr_cache.get(max(2, bg_w - 2), row_h - 2, self.metrics.row_radius, colors["bg"], colors["border"], 1)
+            row.background_canvas.itemconfigure(row.background_id, image=_bg_ph)
+            _icon_ph = _rr_cache.get(26, 26, 6, colors["icon_bg"])
+            row.background_canvas.itemconfigure(row.icon_bg_id, image=_icon_ph)
+            _badge_ph = _rr_cache.get(max(2, badge_w - 1), badge_h - 1, self.metrics.type_badge_radius, colors["type_bg"])
+            row.type_canvas.itemconfigure(row.type_bg_id, image=_badge_ph)
+        else:
+            row.background_canvas.itemconfigure(row.background_id, fill=colors["bg"], outline=colors["border"])
+            row.background_canvas.itemconfigure(row.icon_bg_id, fill=colors["icon_bg"])
+            row.type_canvas.itemconfigure(row.type_bg_id, fill=colors["type_bg"], outline="")
+        row.background_canvas.itemconfigure(row.accent_id, fill=ACCENT, state="normal" if selected else "hidden")
+        row.icon_label.config(bg=colors["icon_bg"], fg=colors["icon_fg"])
+        row.title_text.configure(bg=colors["bg"], fg=colors["title_fg"])
+        row.title_text.tag_configure("match", foreground=MATCH_HIGHLIGHT)
         row.subtitle_label.config(bg=colors["bg"], fg=colors["subtitle_fg"])
         row.type_canvas.config(bg=colors["bg"])
-        row.type_canvas.itemconfigure(row.type_bg_id, fill=colors["type_bg"], outline="")
         row.type_canvas.itemconfigure(row.type_text_id, fill=colors["type_fg"])
 
     def _scroll_row_into_view(self, index: int):
@@ -2038,7 +2181,7 @@ class EffectPalette:
         self._row_width_cache: dict[str, int] = {}
         self._current_results: list[dict] = []
         self._current_row_models: list[ResultRowModel] = []
-        self._current_result_set = SearchResultSet(items=(), total_count=0, visible_count=0, query="")
+        self._current_result_set = SearchResultSet(items=(), match_infos=(), total_count=0, visible_count=0, query="")
         self._stable_results_width = self._fixed_search_window_width
         self._view_state = "idle_empty"
         self._results_region_visible = False
@@ -2058,6 +2201,7 @@ class EffectPalette:
         self._apply_started_at = None
         self._apply_last_status = None
         self._current_apply_effect: dict = {}
+        self._mouse_listener = None
         self._build()
         self._start_file_watcher()
         self._start_premiere_monitor()
@@ -2088,20 +2232,13 @@ class EffectPalette:
         self.main_shell_canvas = tk.Canvas(main_shell, bg=self._root_host_bg, highlightthickness=0, bd=0, relief="flat")
         self.main_shell_canvas.place(x=0, y=0, relwidth=1, relheight=1)
         self.main_shell_bg_id = draw_rounded_rect(
-            self.main_shell_canvas,
-            1,
-            1,
-            self._fixed_search_window_width - 1,
-            48,
-            16,
-            fill=BG2,
-            outline=BORDER,
-            width=1,
+            self.main_shell_canvas, 1, 1, self._fixed_search_window_width - 1, 48, 16,
+            fill=BG2, outline=BORDER, width=1,
         )
         main_shell.bind("<Configure>", lambda event: self._update_shell_surface(self.main_shell_canvas, self.main_shell_bg_id, event.width, event.height, 16))
 
         inner = tk.Frame(main_shell, bg=BG2)
-        inner.pack(fill="both", expand=True, padx=8, pady=8)
+        inner.pack(fill="both", expand=True, padx=8, pady=(8, 0))
 
         search_frame = tk.Frame(inner, bg=BG2, padx=SEARCH_PAD_X)
         search_frame.pack(fill="x")
@@ -2128,8 +2265,8 @@ class EffectPalette:
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x")
 
-        self.cat_frame = tk.Frame(inner, bg=BG2, pady=6)
-        self.cat_frame.pack(fill="x")
+        self.cat_frame = tk.Frame(inner, bg=BG2)
+        self.cat_frame.pack(fill="x", pady=(6, 0))
         self.cat_pills_frame = tk.Frame(self.cat_frame, bg=BG2)
         self.cat_pills_frame.pack(side="left", fill="x", expand=True, padx=(HEADER_PAD_X, 0))
         self.conn_state_canvas = tk.Canvas(self.cat_frame, width=18, height=24, bg=BG2, highlightthickness=0, bd=0, relief="flat")
@@ -2154,15 +2291,8 @@ class EffectPalette:
         self.body_shell_canvas = tk.Canvas(body_outer, bg=self._body_host_bg, highlightthickness=0, bd=0, relief="flat")
         self.body_shell_canvas.place(x=0, y=0, relwidth=1, relheight=1)
         self.body_shell_bg_id = draw_rounded_rect(
-            self.body_shell_canvas,
-            1,
-            1,
-            self._fixed_search_window_width - 1,
-            self._results_expanded_height,
-            16,
-            fill=BG,
-            outline=BORDER,
-            width=1,
+            self.body_shell_canvas, 1, 1, self._fixed_search_window_width - 1, self._results_expanded_height, 16,
+            fill=BG, outline=BORDER, width=1,
         )
         body_outer.bind("<Configure>", lambda event: self._update_shell_surface(self.body_shell_canvas, self.body_shell_bg_id, event.width, event.height, 16))
 
@@ -2190,7 +2320,7 @@ class EffectPalette:
         self.footer.pack(fill="x")
         tk.Label(
             self.footer,
-            text="Up/Down navegar   Enter aplicar   ESC fechar",
+            text="[↑↓] navegar  [↵] aplicar  [esc] fechar",
             bg=BG,
             fg=TEXT_MUTED,
             font=(self.ui_font_family, 8),
@@ -2339,17 +2469,14 @@ class EffectPalette:
             relief="flat",
             cursor="hand2",
         )
-        background_id = draw_rounded_rect(
-            canvas,
-            0,
-            0,
-            size - 1,
-            size - 1,
-            10,
-            fill=REFRESH_BUTTON_BG,
-            outline=REFRESH_BUTTON_BORDER,
-            width=1,
-        )
+        if _rr_cache:
+            _btn_ph = _rr_cache.get(size - 1, size - 1, 10, REFRESH_BUTTON_BG, REFRESH_BUTTON_BORDER, 1)
+            background_id = canvas.create_image(0, 0, image=_btn_ph, anchor="nw")
+        else:
+            background_id = draw_rounded_rect(
+                canvas, 0, 0, size - 1, size - 1, 10,
+                fill=REFRESH_BUTTON_BG, outline=REFRESH_BUTTON_BORDER, width=1,
+            )
         text_id = canvas.create_text(
             size / 2,
             size / 2,
@@ -2366,11 +2493,13 @@ class EffectPalette:
 
     def _set_refresh_button_visual(self):
         tokens = get_reload_button_tokens(hovered=self._refresh_btn_hovered, pressed=self._refresh_btn_pressed)
-        self.refresh_btn.canvas.itemconfigure(
-            self.refresh_btn.background_id,
-            fill=tokens["bg"],
-            outline=tokens["border"],
-        )
+        if _rr_cache:
+            photo = _rr_cache.get(27, 27, 10, tokens["bg"], tokens["border"], 1)
+            self.refresh_btn.canvas.itemconfigure(self.refresh_btn.background_id, image=photo)
+        else:
+            self.refresh_btn.canvas.itemconfigure(
+                self.refresh_btn.background_id, fill=tokens["bg"], outline=tokens["border"],
+            )
         self.refresh_btn.canvas.itemconfigure(self.refresh_btn.text_id, fill=tokens["fg"])
 
     def _on_refresh_enter(self, event=None):
@@ -2407,17 +2536,14 @@ class EffectPalette:
             relief="flat",
             cursor="hand2",
         )
-        background_id = draw_rounded_rect(
-            canvas,
-            0,
-            0,
-            width - 1,
-            height - 1,
-            metrics.chip_radius,
-            fill=CHIP_BG,
-            outline=CHIP_BORDER,
-            width=1,
-        )
+        if _rr_cache:
+            _pill_ph = _rr_cache.get(width - 1, height - 1, metrics.chip_radius, CHIP_BG, CHIP_BORDER, 1)
+            background_id = canvas.create_image(0, 0, image=_pill_ph, anchor="nw")
+        else:
+            background_id = draw_rounded_rect(
+                canvas, 0, 0, width - 1, height - 1, metrics.chip_radius,
+                fill=CHIP_BG, outline=CHIP_BORDER, width=1,
+            )
         text_id = canvas.create_text(
             width / 2,
             height / 2,
@@ -2450,7 +2576,15 @@ class EffectPalette:
 
     def _animate_pill_to(self, cat: str, bg_target: str, fg_target: str, *, immediate: bool = False):
         pill = self._category_pills[cat]
-        pill.canvas.itemconfigure(pill.background_id, fill=bg_target, outline=blend_colors(CHIP_BORDER, bg_target, 0.35))
+        if _rr_cache:
+            metrics = PaletteLayoutMetrics()
+            w = int(str(pill.canvas.cget("width")))
+            h = metrics.chip_height
+            outline = blend_colors(CHIP_BORDER, bg_target, 0.35)
+            photo = _rr_cache.get(max(2, w - 1), max(2, h - 1), metrics.chip_radius, bg_target, outline, 1)
+            pill.canvas.itemconfigure(pill.background_id, image=photo)
+        else:
+            pill.canvas.itemconfigure(pill.background_id, fill=bg_target, outline=blend_colors(CHIP_BORDER, bg_target, 0.35))
         pill.canvas.itemconfigure(pill.text_id, fill=fg_target)
         self._category_pill_state[cat] = (bg_target, fg_target)
 
@@ -2655,10 +2789,10 @@ class EffectPalette:
     def _build_visible_row_models(self, items: list[dict]) -> list[ResultRowModel]:
         return [self._build_result_row_model(effect) for effect in items]
 
-    def _apply_results_models(self, row_models: list[ResultRowModel]):
+    def _apply_results_models(self, row_models: list[ResultRowModel], match_infos: list["MatchInfo | None"] | None = None):
         self._current_row_models = list(row_models)
         if row_models:
-            self.results_controller.render(row_models)
+            self.results_controller.render(row_models, match_infos)
         else:
             self.results_controller.clear()
 
@@ -2752,7 +2886,8 @@ class EffectPalette:
 
         row_models = self._build_visible_row_models(self._current_results)
         perf.mark("row_models")
-        self._apply_results_models(row_models)
+        match_infos = list(self._current_result_set.match_infos)
+        self._apply_results_models(row_models, match_infos)
         perf.mark("render")
         self._apply_results_geometry(previous_state, row_models, interactive=self._is_interactive_search(), settled_pass=settled_pass)
         perf.mark("geometry")
@@ -3216,7 +3351,7 @@ class EffectPalette:
         self._active_category = None
         self._current_results = []
         self._current_row_models = []
-        self._current_result_set = SearchResultSet(items=(), total_count=0, visible_count=0, query="")
+        self._current_result_set = SearchResultSet(items=(), match_infos=(), total_count=0, visible_count=0, query="")
         self._interactive_until = 0.0
         self._stable_results_width = self._fixed_search_window_width
         self._window_width, self._window_height = choose_search_shell_dimensions(
@@ -3413,6 +3548,7 @@ class EffectPalette:
             self.root.after(140, lambda m=OPEN_FOCUS_ATTEMPTS: self._force_focus_attempt(0, m))
         self._animate_open()
         self.root.after(FOCUS_OUT_REBIND_MS, lambda: self.root.bind("<FocusOut>", self._on_focus_out))
+        self._start_mouse_listener()
         self._has_shown_once = True
 
     def hide(self):
@@ -3421,8 +3557,55 @@ class EffectPalette:
         self.is_open = False
         self._is_closing = True
         self._cancel_focus_out_job()
+        self._stop_mouse_listener()
         self.tweens.cancel("window_open")
         self._animate_close()
+
+    def _click_inside_palette(self, x: int, y: int) -> bool:
+        for win in (self.root, self.body_win):
+            if win is None or not win.winfo_exists():
+                continue
+            try:
+                if not win.winfo_viewable():
+                    continue
+                wx, wy = win.winfo_rootx(), win.winfo_rooty()
+                ww, wh = win.winfo_width(), win.winfo_height()
+                if wx <= x < wx + ww and wy <= y < wy + wh:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _start_mouse_listener(self):
+        if not HAS_PYNPUT:
+            return
+        self._stop_mouse_listener()
+
+        def on_click(x, y, button, pressed):
+            if not pressed or not self.is_open:
+                return
+            if time.monotonic() < self._focus_out_grace_until:
+                return
+            if getattr(self, "_suspend_focus_out", False):
+                return
+            if self._click_inside_palette(x, y):
+                return
+            if self.root.winfo_exists():
+                self.root.after(0, self.hide)
+
+        listener = pynput_mouse.Listener(on_click=on_click)
+        listener.daemon = True
+        listener.start()
+        self._mouse_listener = listener
+
+    def _stop_mouse_listener(self):
+        listener = self._mouse_listener
+        if listener is not None:
+            self._mouse_listener = None
+            try:
+                listener.stop()
+            except Exception:
+                pass
 
     def hide_to_tray(self):
         self.hide()
@@ -3452,6 +3635,7 @@ class EffectPalette:
 
     def shutdown(self):
         beta_report.write_event("session_shutdown")
+        self._stop_mouse_listener()
 
         if self._watch_job is not None and self.root.winfo_exists():
             try:
