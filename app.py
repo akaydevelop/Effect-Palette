@@ -118,7 +118,7 @@ WIDTH_MEASURE_SAMPLE = 12
 RESULTS_COLLAPSED_HEIGHT = 0
 RESULTS_MESSAGE_HEIGHT = 54
 RESULTS_EXPANDED_HEIGHT = 248
-OPEN_ANIMATION_MS = 140
+OPEN_ANIMATION_MS = 50
 CLOSE_ANIMATION_MS = 110
 STATE_ANIMATION_MS = 100
 PILL_ANIMATION_MS = 120
@@ -131,9 +131,13 @@ USE_WINDOW_ALPHA = False
 FIXED_SEARCH_WINDOW_WIDTH = 760
 POINTER_WINDOW_MARGIN = 12
 POINTER_VERTICAL_GAP = 18
-OPEN_FOCUS_ATTEMPTS = 6
+OPEN_FOCUS_ATTEMPTS = 2
 FOCUS_OUT_REBIND_MS = 850
 FOCUS_GRACE_SECONDS = 1.2
+APPLY_STATUS_INITIAL_DELAY_MS = 40
+APPLY_STATUS_POLL_MS = 60
+APPLY_STATUS_TIMEOUT_MS = 5000
+APPLY_SUCCESS_CLOSE_DELAY_MS = 300
 HEADER_PAD_X = 14
 HEADER_PAD_Y = 8
 SEARCH_PAD_X = 14
@@ -1258,6 +1262,48 @@ def send_command(effect: dict):
     BRIDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_safe(BRIDGE_FILE, json.dumps(payload, indent=2))
     print(f"[Bridge] Enviado: {effect['name']}")
+    return float(payload["timestamp"])
+
+
+def read_bridge_status(expected_timestamp: float | None) -> str | None:
+    """Read a bridge status only when it belongs to the command being tracked."""
+    if expected_timestamp is None:
+        return None
+    try:
+        with BRIDGE_FILE.open(encoding="utf-8") as file_obj:
+            payload = json.load(file_obj)
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("timestamp") != expected_timestamp:
+            return None
+        status = payload.get("status")
+        return str(status) if status else None
+    except (OSError, ValueError, TypeError):
+        # The CEP worker may be replacing the file at this exact moment.
+        return None
+
+
+def bridge_status_is_terminal(status: str | None) -> bool:
+    return status == "done" or bool(status and status.startswith("error"))
+
+
+def bridge_status_is_success(status: str | None) -> bool:
+    return status == "done"
+
+
+def format_bridge_failure(status: str | None) -> str:
+    if not status:
+        return "Premiere nao respondeu"
+    labels = {
+        "error_no_selection": "Nenhuma selecao disponivel",
+        "error_no_sequence": "Nenhuma sequencia ativa",
+        "error_not_found": "Item nao encontrado",
+        "error_not_inserted": "Item nao inserido",
+        "error_template_missing": "Template ausente",
+        "error_create_failed": "Falha ao criar item",
+        "error_not_supported": "Item nao suportado",
+    }
+    return labels.get(status, "Falha ao aplicar")
 
 
 def _premiere_process_via_toolhelp() -> bool | None:
@@ -2006,6 +2052,12 @@ class EffectPalette:
         self._premiere_missing_since = None
         self._premiere_monitor_job = None
         self._feedback_prompt_shown = False
+        self._apply_busy = False
+        self._apply_poll_job = None
+        self._apply_command_timestamp = None
+        self._apply_started_at = None
+        self._apply_last_status = None
+        self._current_apply_effect: dict = {}
         self._build()
         self._start_file_watcher()
         self._start_premiere_monitor()
@@ -2505,6 +2557,8 @@ class EffectPalette:
             self._prepare_for_next_show(force=True)
 
     def _manual_refresh(self):
+        if self._apply_busy:
+            return
         send_debug_command("exportEffects")
         self.status_label.config(text="Solicitando atualizacao ao Premiere...")
         self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
@@ -2727,7 +2781,101 @@ class EffectPalette:
             return
         self.results_controller.move_selection(direction)
 
+    def _apply_action_label(self, effect: dict) -> str:
+        effect_type = effect.get("type")
+        if effect_type in {"project_item", "generic_item", "favorite_item"}:
+            return "Inserindo"
+        if effect_type in {"transition_video", "transition_audio"}:
+            return "Aplicando transicao"
+        if effect_type == "preset":
+            return "Aplicando preset"
+        return "Aplicando"
+
+    def _set_apply_busy(self, busy: bool, label: str = ""):
+        self._apply_busy = busy
+        self.entry.configure(state="disabled" if busy else "normal")
+        if label:
+            self.status_label.config(text=label)
+
+    def _poll_apply_status(self):
+        self._apply_poll_job = None
+        if not self._apply_busy:
+            return
+        status = read_bridge_status(self._apply_command_timestamp)
+        if status and status != self._apply_last_status:
+            self._apply_last_status = status
+            beta_report.write_event("apply_status_changed", {
+                "name": self._current_apply_effect.get("name", ""),
+                "status": status,
+            })
+        if status and bridge_status_is_terminal(status):
+            self._complete_apply(status)
+            return
+        if self._apply_started_at is not None:
+            elapsed_ms = (time.perf_counter() - self._apply_started_at) * 1000.0
+            if elapsed_ms >= APPLY_STATUS_TIMEOUT_MS:
+                self._apply_busy = False
+                self.entry.configure(state="normal")
+                self.status_label.config(text="Premiere nao respondeu")
+                beta_report.write_event("apply_timeout", {
+                    "name": self._current_apply_effect.get("name", ""),
+                    "elapsed_ms": round(elapsed_ms, 2),
+                })
+                return
+        self._apply_poll_job = self.root.after(APPLY_STATUS_POLL_MS, self._poll_apply_status)
+
+    def _complete_apply(self, status: str):
+        self._apply_poll_job = None
+        effect_name = self._current_apply_effect.get("name", "")
+        elapsed_ms = None
+        if self._apply_started_at is not None:
+            elapsed_ms = round((time.perf_counter() - self._apply_started_at) * 1000.0, 2)
+        self._apply_busy = False
+        self.entry.configure(state="normal")
+        if bridge_status_is_success(status):
+            self.status_label.config(text=f"[Aplicado] {effect_name}")
+            beta_report.write_event("apply_completed", {
+                "name": effect_name,
+                "status": status,
+                "elapsed_ms": elapsed_ms,
+            })
+            self.root.after(APPLY_SUCCESS_CLOSE_DELAY_MS, self.hide)
+        else:
+            self.status_label.config(text=format_bridge_failure(status))
+            beta_report.write_event("apply_failed", {
+                "name": effect_name,
+                "status": status,
+                "elapsed_ms": elapsed_ms,
+            })
+
+    def _begin_apply(self, effect: dict):
+        name = effect.get("name", "")
+        self._current_apply_effect = effect
+        self._set_apply_busy(True, f"{self._apply_action_label(effect)}: {name}")
+        self.root.update_idletasks()
+        try:
+            self._apply_command_timestamp = send_command(effect)
+        except Exception as exc:
+            self._apply_busy = False
+            self.entry.configure(state="normal")
+            self.status_label.config(text="Falha ao enviar comando")
+            beta_report.log_exception("Apply command failed", exc)
+            return
+        self._apply_started_at = time.perf_counter()
+        self._apply_last_status = None
+        beta_report.write_event("apply_started", {
+            "name": name,
+            "type": effect.get("type", ""),
+            "timestamp": self._apply_command_timestamp,
+        })
+        self._apply_poll_job = self.root.after(
+            APPLY_STATUS_INITIAL_DELAY_MS,
+            self._poll_apply_status,
+        )
+
     def _apply_selected(self):
+        if self._apply_busy:
+            return
         if not self._results_visible():
             return
         effect = self.results_controller.selected_payload()
@@ -2742,15 +2890,7 @@ class EffectPalette:
             effect = dict(effect)
             effect["transitionPlacement"] = placement
 
-        send_command(effect)
-        if effect.get("type") in {"project_item", "generic_item", "favorite_item"}:
-            self.status_label.config(text=f"[Inserido] {effect['name']}")
-        elif effect.get("type") in {"transition_video", "transition_audio"}:
-            self.status_label.config(text=f"[Transicao] {effect['name']}")
-        else:
-            self.status_label.config(text=f"[Aplicado] {effect['name']}")
-        self.root.update()
-        self.root.after(900, self.hide)
+        self._begin_apply(effect)
 
     def _choose_transition_placement(self) -> str | None:
         choice = {"value": None}
@@ -3238,7 +3378,11 @@ class EffectPalette:
 
         self.tweens.tween("window_close", CLOSE_ANIMATION_MS, step, easing=ease_in_expo, on_complete=finish)
 
-    def show(self):
+    def show(self, invoked_at: float | None = None):
+        if invoked_at is not None:
+            beta_report.write_event("palette_open_requested", {
+                "renderer": "tk",
+            })
         if self.is_open:
             return
         self.tweens.cancel("window_close")
@@ -3272,7 +3416,7 @@ class EffectPalette:
         self._has_shown_once = True
 
     def hide(self):
-        if not self.is_open or self._is_closing:
+        if self._apply_busy or not self.is_open or self._is_closing:
             return
         self.is_open = False
         self._is_closing = True
@@ -3337,6 +3481,13 @@ class EffectPalette:
                 pass
             self._premiere_monitor_job = None
 
+        if self._apply_poll_job is not None and self.root.winfo_exists():
+            try:
+                self.root.after_cancel(self._apply_poll_job)
+            except Exception:
+                pass
+            self._apply_poll_job = None
+
         self._cancel_focus_out_job()
         self.tweens.finish()
 
@@ -3361,8 +3512,8 @@ class EffectPalette:
             except Exception:
                 pass
 
-    def toggle(self):
-        self.hide() if self.is_open else self.show()
+    def toggle(self, invoked_at: float | None = None):
+        self.hide() if self.is_open else self.show(invoked_at=invoked_at)
 
     def run(self):
         self.root.mainloop()
@@ -3371,6 +3522,7 @@ class EffectPalette:
 if HAS_QT:
     class QtRootAdapter(QtCore.QObject):
         _schedule_requested = QtCore.Signal(int, int)
+        _post_requested = QtCore.Signal(object)
 
         def __init__(self, app: QtWidgets.QApplication):
             super().__init__()
@@ -3380,6 +3532,7 @@ if HAS_QT:
             self._timers: dict[int, QtCore.QTimer] = {}
             self._destroyed = False
             self._schedule_requested.connect(self._start_timer, QtCore.Qt.ConnectionType.QueuedConnection)
+            self._post_requested.connect(self._run_post, QtCore.Qt.ConnectionType.QueuedConnection)
 
         def after(self, delay_ms: int, callback=None, *args):
             if callback is None:
@@ -3392,6 +3545,11 @@ if HAS_QT:
 
         def after_idle(self, callback=None, *args):
             return self.after(0, callback, *args)
+
+        def post(self, callback=None, *args):
+            if callback is None or self._destroyed:
+                return
+            self._post_requested.emit(lambda: callback(*args))
 
         def after_cancel(self, job_id):
             if job_id is None:
@@ -3419,6 +3577,11 @@ if HAS_QT:
             timer.timeout.connect(fire)
             self._timers[job_id] = timer
             timer.start(delay_ms)
+
+        @QtCore.Slot(object)
+        def _run_post(self, callback):
+            if not self._destroyed:
+                callback()
 
         def winfo_exists(self):
             return not self._destroyed
@@ -3584,6 +3747,17 @@ if HAS_QT:
             self._qt_middle_height = 0
             self._previous_foreground_hwnd = None
             self._focus_attempt_job = None
+            self._native_hwnd = None
+            self._open_requested_at = None
+            self._focus_reported = False
+            self._apply_busy = False
+            self._apply_finishing = False
+            self._apply_poll_job = None
+            self._apply_close_job = None
+            self._apply_command_timestamp = None
+            self._apply_started_at = None
+            self._apply_last_status = None
+            self._current_apply_effect: dict = {}
             self.tray_controller = None
             self._exiting = False
             self._build()
@@ -3617,6 +3791,7 @@ if HAS_QT:
             self.entry.setObjectName("searchEntry")
             self.entry.setFrame(False)
             self.entry.textChanged.connect(self._on_search_change)
+            self.entry.returnPressed.connect(self._apply_selected)
             self.refresh_btn = QtWidgets.QPushButton(get_reload_icon_glyph())
             self.refresh_btn.setObjectName("refreshButton")
             self.refresh_btn.setFixedSize(28, 28)
@@ -3677,8 +3852,15 @@ if HAS_QT:
             self.help_label.setObjectName("helpLabel")
             self.status_label = QtWidgets.QLabel("")
             self.status_label.setObjectName("statusLabel")
+            self.apply_progress = QtWidgets.QProgressBar()
+            self.apply_progress.setObjectName("applyProgress")
+            self.apply_progress.setRange(0, 0)
+            self.apply_progress.setTextVisible(False)
+            self.apply_progress.setFixedSize(72, 4)
+            self.apply_progress.hide()
             footer_layout.addWidget(self.help_label)
             footer_layout.addStretch(1)
+            footer_layout.addWidget(self.apply_progress)
             footer_layout.addWidget(self.status_label)
             body_layout.addWidget(self.footer)
 
@@ -3686,6 +3868,10 @@ if HAS_QT:
             self._update_category_buttons()
             self._update_connection_indicator()
             self._set_idle_state()
+            self.window.layout().activate()
+            self._resize_to_content()
+            self._idle_window_height = self.window.height()
+            self._native_hwnd = self._window_hwnd()
             self.window.hide()
 
         def _load_qt_fonts(self):
@@ -3770,6 +3956,15 @@ if HAS_QT:
                     color: {ACCENT};
                     font-size: 11px;
                     font-weight: 700;
+                }}
+                QProgressBar#applyProgress {{
+                    background: {ROW_BORDER};
+                    border: 0;
+                    border-radius: 2px;
+                }}
+                QProgressBar#applyProgress::chunk {{
+                    background: {ACCENT};
+                    border-radius: 2px;
                 }}
                 QScrollBar:vertical {{
                     background: {BG};
@@ -3945,7 +4140,147 @@ if HAS_QT:
                 return self._current_row_models[row].payload
             return None
 
+        def _apply_action_label(self, effect: dict) -> str:
+            effect_type = effect.get("type")
+            if effect_type in {"project_item", "generic_item", "favorite_item"}:
+                return "Inserindo"
+            if effect_type in {"transition_video", "transition_audio"}:
+                return "Aplicando transicao"
+            if effect_type == "preset":
+                return "Aplicando preset"
+            return "Aplicando"
+
+        def _set_apply_busy(self, busy: bool, label: str = ""):
+            self._apply_busy = busy
+            self.apply_progress.setVisible(busy)
+            self.entry.setEnabled(not busy)
+            self.refresh_btn.setEnabled(not busy)
+            for button in self.category_buttons.values():
+                button.setEnabled(not busy)
+            if label:
+                self.status_label.setText(label)
+
+        def _cancel_apply_tracking(self):
+            if self._apply_poll_job is not None:
+                self.root.after_cancel(self._apply_poll_job)
+                self._apply_poll_job = None
+            if self._apply_close_job is not None:
+                self.root.after_cancel(self._apply_close_job)
+                self._apply_close_job = None
+            self._apply_command_timestamp = None
+            self._apply_started_at = None
+            self._apply_last_status = None
+
+        def _complete_apply(self, status: str):
+            self._apply_poll_job = None
+            elapsed_ms = None
+            if self._apply_started_at is not None:
+                elapsed_ms = round((time.perf_counter() - self._apply_started_at) * 1000.0, 2)
+            effect_name = ""
+            if self._current_apply_effect:
+                effect_name = self._current_apply_effect.get("name", "")
+            self.apply_progress.hide()
+            if bridge_status_is_success(status):
+                self.status_label.setText(f"[Aplicado] {effect_name}")
+                beta_report.write_event("apply_completed", {
+                    "name": effect_name,
+                    "status": status,
+                    "elapsed_ms": elapsed_ms,
+                })
+                self._apply_busy = True
+                self._apply_finishing = True
+                self._apply_close_job = self.root.after(
+                    APPLY_SUCCESS_CLOSE_DELAY_MS,
+                    self._finish_successful_apply,
+                )
+                return
+
+            self._apply_busy = False
+            self._apply_finishing = False
+            self.entry.setEnabled(True)
+            self.refresh_btn.setEnabled(True)
+            for button in self.category_buttons.values():
+                button.setEnabled(True)
+            self.status_label.setText(format_bridge_failure(status))
+            beta_report.write_event("apply_failed", {
+                "name": effect_name,
+                "status": status,
+                "elapsed_ms": elapsed_ms,
+            })
+            self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
+
+        def _finish_successful_apply(self):
+            self._apply_close_job = None
+            self._apply_busy = False
+            self._apply_finishing = False
+            self.hide()
+
+        def _poll_apply_status(self):
+            self._apply_poll_job = None
+            if not self._apply_busy:
+                return
+            status = read_bridge_status(self._apply_command_timestamp)
+            if status and status != self._apply_last_status:
+                self._apply_last_status = status
+                beta_report.write_event("apply_status_changed", {
+                    "name": self._current_apply_effect.get("name", ""),
+                    "status": status,
+                })
+            if status and bridge_status_is_terminal(status):
+                self._complete_apply(status)
+                return
+            if self._apply_started_at is not None:
+                elapsed_ms = (time.perf_counter() - self._apply_started_at) * 1000.0
+                if elapsed_ms >= APPLY_STATUS_TIMEOUT_MS:
+                    self._apply_busy = False
+                    self._apply_finishing = False
+                    self.apply_progress.hide()
+                    self.entry.setEnabled(True)
+                    self.refresh_btn.setEnabled(True)
+                    for button in self.category_buttons.values():
+                        button.setEnabled(True)
+                    self.status_label.setText("Premiere nao respondeu")
+                    beta_report.write_event("apply_timeout", {
+                        "name": self._current_apply_effect.get("name", ""),
+                        "elapsed_ms": round(elapsed_ms, 2),
+                    })
+                    self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
+                    return
+            self._apply_poll_job = self.root.after(APPLY_STATUS_POLL_MS, self._poll_apply_status)
+
+        def _begin_apply(self, effect: dict):
+            action = self._apply_action_label(effect)
+            name = effect.get("name", "")
+            self._current_apply_effect = effect
+            self._set_apply_busy(True, f"{action}: {name}")
+            self.app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            try:
+                self._apply_command_timestamp = send_command(effect)
+            except Exception as exc:
+                self._apply_busy = False
+                self.apply_progress.hide()
+                self.entry.setEnabled(True)
+                self.refresh_btn.setEnabled(True)
+                for button in self.category_buttons.values():
+                    button.setEnabled(True)
+                self.status_label.setText("Falha ao enviar comando")
+                beta_report.log_exception("Apply command failed", exc)
+                return
+            self._apply_started_at = time.perf_counter()
+            self._apply_last_status = None
+            beta_report.write_event("apply_started", {
+                "name": name,
+                "type": effect.get("type", ""),
+                "timestamp": self._apply_command_timestamp,
+            })
+            self._apply_poll_job = self.root.after(
+                APPLY_STATUS_INITIAL_DELAY_MS,
+                self._poll_apply_status,
+            )
+
         def _apply_selected(self):
+            if self._apply_busy or self._apply_finishing:
+                return
             effect = self._selected_payload()
             if not effect:
                 return
@@ -3960,11 +4295,11 @@ if HAS_QT:
                     if result != QtWidgets.QMessageBox.StandardButton.Yes:
                         self.status_label.setText("Aplicacao cancelada")
                         return
-            send_command(effect)
-            self.status_label.setText(f"[Aplicado] {effect.get('name', '')}")
-            self.root.after(900, self.hide)
+            self._begin_apply(effect)
 
         def _manual_refresh(self):
+            if self._apply_busy or self._apply_finishing:
+                return
             send_debug_command("exportEffects")
             self.status_label.setText("Solicitando atualizacao ao Premiere...")
             self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
@@ -4075,8 +4410,11 @@ if HAS_QT:
                 self._anchor_window_to_pointer()
 
         def _window_hwnd(self) -> int | None:
+            if self._native_hwnd:
+                return self._native_hwnd
             try:
-                return int(self.window.winId())
+                self._native_hwnd = int(self.window.winId())
+                return self._native_hwnd
             except Exception:
                 return None
 
@@ -4100,9 +4438,27 @@ if HAS_QT:
                 self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
             except Exception:
                 pass
+            if self.entry.hasFocus():
+                self._cancel_focus_attempts()
+                if not self._focus_reported:
+                    self._focus_reported = True
+                    elapsed_ms = None
+                    if self._open_requested_at is not None:
+                        elapsed_ms = round((time.perf_counter() - self._open_requested_at) * 1000.0, 2)
+                    beta_report.write_event("palette_focus_acquired", {
+                        "attempt": attempt,
+                        "elapsed_ms": elapsed_ms,
+                    })
+                    if self._open_requested_at is not None:
+                        beta_report.write_event("palette_open_latency", {
+                            "elapsed_ms": elapsed_ms,
+                            "focus_attempt": attempt,
+                        })
+                return
             if attempt < max_attempts:
+                retry_delay = (25, 75)[min(attempt, 1)]
                 self._focus_attempt_job = self.root.after(
-                    35 + (attempt * 35),
+                    retry_delay,
                     lambda a=attempt + 1, m=max_attempts: self._force_focus_attempt(a, m),
                 )
 
@@ -4122,12 +4478,15 @@ if HAS_QT:
             if previous and previous != current:
                 activate_window_handle_native(previous)
 
-        def show(self):
+        def show(self, invoked_at: float | None = None):
             if self.is_open:
                 self.window.raise_()
                 self.window.activateWindow()
                 self._force_focus_attempt()
                 return
+            self._open_requested_at = invoked_at or time.perf_counter()
+            self._focus_reported = False
+            beta_report.write_event("palette_open_requested")
             self._remember_previous_focus()
             self.is_open = True
             self.entry.blockSignals(True)
@@ -4135,15 +4494,23 @@ if HAS_QT:
             self.entry.blockSignals(False)
             self._active_category = None
             self._update_category_buttons()
-            self._refresh_list()
-            self._resize_to_content()
+            self._cancel_render_chunk()
+            self._current_results = []
+            self._current_row_models = []
+            self._current_result_set = SearchResultSet(items=(), total_count=0, visible_count=0, query="")
+            self.results_list.clear()
+            self.status_label.setText("")
+            self._set_idle_state()
             self._anchor_window_to_pointer()
-            self.window.setWindowOpacity(0.0)
+            self.window.setFixedSize(FIXED_SEARCH_WINDOW_WIDTH, self._idle_window_height)
+            self.window.setWindowOpacity(0.92)
             self.window.show()
             self._force_focus_attempt()
             self._animate_window_opacity(1.0, OPEN_ANIMATION_MS, ease_out_expo)
 
         def hide(self):
+            if self._apply_busy:
+                return
             if not self.is_open:
                 return
             self.is_open = False
@@ -4170,8 +4537,8 @@ if HAS_QT:
             animation.start(QtCore.QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
             self._opacity_animation = animation
 
-        def toggle(self):
-            self.hide() if self.is_open else self.show()
+        def toggle(self, invoked_at: float | None = None):
+            self.hide() if self.is_open else self.show(invoked_at=invoked_at)
 
         def request_exit(self):
             if self._exiting:
@@ -4191,7 +4558,16 @@ if HAS_QT:
 
         def shutdown(self):
             beta_report.write_event("session_shutdown")
-            for job_name in ("_watch_job", "_data_refresh_job", "_search_job", "_premiere_monitor_job", "_render_chunk_job", "_focus_attempt_job"):
+            for job_name in (
+                "_watch_job",
+                "_data_refresh_job",
+                "_search_job",
+                "_premiere_monitor_job",
+                "_render_chunk_job",
+                "_focus_attempt_job",
+                "_apply_poll_job",
+                "_apply_close_job",
+            ):
                 job = getattr(self, job_name, None)
                 if job is not None:
                     self.root.after_cancel(job)
@@ -4659,24 +5035,39 @@ class HotkeyListener:
             )
         return specs
 
-    def _dispatch_hotkey(self, spec: HotkeySpec):
+    def _dispatch_hotkey(self, spec: HotkeySpec, *, triggered_at: float | None = None, focus_verified: bool = False):
         beta_report.write_event("hotkey_triggered", {"name": spec.name})
-        if spec.requires_premiere_focus and not premiere_is_focused():
+        if spec.requires_premiere_focus and not focus_verified and not premiere_is_focused():
             beta_report.write_event("hotkey_ignored_focus", {"name": spec.name})
             return
 
         if spec.callback_name == "toggle_palette":
-            self.palette.toggle()
+            try:
+                self.palette.toggle(invoked_at=triggered_at)
+            except TypeError:
+                self.palette.toggle()
         elif spec.callback_name == "toggle_debug":
             self.debug.toggle()
         elif spec.callback_name == "quit":
             print("[App] Encerrando via Ctrl+Q...")
             self.palette.request_exit()
 
-    def _schedule_dispatch(self, spec: HotkeySpec):
+    def _schedule_dispatch(self, spec: HotkeySpec, *, native_focus_checked: bool = False):
         try:
             if self.palette.root and self.palette.root.winfo_exists():
-                self.palette.root.after(0, lambda spec=spec: self._dispatch_hotkey(spec))
+                triggered_at = time.perf_counter()
+                if spec.requires_premiere_focus and native_focus_checked and not premiere_is_focused():
+                    beta_report.write_event("hotkey_ignored_focus", {"name": spec.name})
+                    return
+                callback = lambda spec=spec, started=triggered_at, checked=native_focus_checked: self._dispatch_hotkey(
+                    spec,
+                    triggered_at=started,
+                    focus_verified=checked,
+                )
+                if hasattr(self.palette.root, "post"):
+                    self.palette.root.post(callback)
+                else:
+                    self.palette.root.after(0, callback)
         except Exception as exc:
             beta_report.log_exception("Hotkey dispatch scheduling failed", exc)
 
@@ -4741,7 +5132,7 @@ class HotkeyListener:
                 if msg.message == WM_HOTKEY:
                     spec = self._specs_by_id.get(int(msg.wParam))
                     if spec is not None:
-                        self._schedule_dispatch(spec)
+                        self._schedule_dispatch(spec, native_focus_checked=True)
         except Exception as exc:
             self._native_backend_unavailable = True
             beta_report.log_exception("Native hotkey thread failed", exc)
