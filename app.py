@@ -3916,7 +3916,7 @@ if HAS_QT:
             self._active_category = None
             self._current_results: list[dict] = []
             self._current_row_models: list[ResultRowModel] = []
-            self._current_result_set = SearchResultSet(items=(), total_count=0, visible_count=0, query="")
+            self._current_result_set = SearchResultSet(items=(), match_infos=(), total_count=0, visible_count=0, query="")
             self._search_job = None
             self._data_refresh_job = None
             self._watch_job = None
@@ -4681,7 +4681,7 @@ if HAS_QT:
             self._cancel_render_chunk()
             self._current_results = []
             self._current_row_models = []
-            self._current_result_set = SearchResultSet(items=(), total_count=0, visible_count=0, query="")
+            self._current_result_set = SearchResultSet(items=(), match_infos=(), total_count=0, visible_count=0, query="")
             self.results_list.clear()
             self.status_label.setText("")
             self._set_idle_state()
