@@ -12,9 +12,11 @@ import json
 import locale
 import os
 import platform
+import queue
 import shutil
 import socket
 import sys
+import threading
 import time
 import traceback
 import zipfile
@@ -39,6 +41,9 @@ def _documents_dir() -> Path:
 REPORT_DIR = _documents_dir() / REPORT_DIR_NAME
 APP_LOG_FILE = REPORT_DIR / "effect_palette_app.log"
 EVENTS_FILE = REPORT_DIR / "telemetry_events.jsonl"
+_EVENT_QUEUE: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=2048)
+_EVENT_THREAD: threading.Thread | None = None
+_EVENT_THREAD_LOCK = threading.Lock()
 
 
 def ensure_report_dir() -> Path:
@@ -60,19 +65,71 @@ def log_app(message: str, level: str = "INFO") -> None:
         pass
 
 
-def write_event(event_type: str, payload: dict[str, Any] | None = None) -> None:
+def _write_event_sync(event: dict[str, Any]) -> None:
     try:
         ensure_report_dir()
-        event = {
-            "timestamp": _now_iso(),
-            "session_id": SESSION_ID,
-            "event": event_type,
-            "payload": payload or {},
-        }
         with EVENTS_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def _event_writer() -> None:
+    while True:
+        event = _EVENT_QUEUE.get()
+        try:
+            if event is None:
+                return
+            _write_event_sync(event)
+        finally:
+            _EVENT_QUEUE.task_done()
+
+
+def _ensure_event_writer() -> None:
+    global _EVENT_THREAD
+    with _EVENT_THREAD_LOCK:
+        if _EVENT_THREAD is not None and _EVENT_THREAD.is_alive():
+            return
+        _EVENT_THREAD = threading.Thread(target=_event_writer, name="BetaEventWriter", daemon=True)
+        _EVENT_THREAD.start()
+
+
+def write_event(event_type: str, payload: dict[str, Any] | None = None) -> None:
+    event = {
+        "timestamp": _now_iso(),
+        "session_id": SESSION_ID,
+        "event": event_type,
+        "payload": payload or {},
+    }
+    _ensure_event_writer()
+    try:
+        _EVENT_QUEUE.put_nowait(event)
+    except queue.Full:
+        pass
+
+
+def flush_events(timeout: float = 0.5) -> None:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while _EVENT_QUEUE.unfinished_tasks and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
+def shutdown_events(timeout: float = 0.5) -> None:
+    global _EVENT_THREAD
+    flush_events(timeout)
+    with _EVENT_THREAD_LOCK:
+        thread = _EVENT_THREAD
+        if thread is None or not thread.is_alive():
+            _EVENT_THREAD = None
+            return
+        try:
+            _EVENT_QUEUE.put_nowait(None)
+        except queue.Full:
+            return
+    thread.join(timeout=max(0.0, timeout))
+    with _EVENT_THREAD_LOCK:
+        if _EVENT_THREAD is thread and not thread.is_alive():
+            _EVENT_THREAD = None
 
 
 def start_session(extension_dir: Path, ext_data: Path) -> None:
@@ -94,7 +151,12 @@ def log_exception(context: str, exc: BaseException) -> None:
             f.write(traceback.format_exc() + "\n")
     except Exception:
         pass
-    write_event("exception", {"context": context, "error": str(exc)})
+    _write_event_sync({
+        "timestamp": _now_iso(),
+        "session_id": SESSION_ID,
+        "event": "exception",
+        "payload": {"context": context, "error": str(exc)},
+    })
 
 
 def _file_info(path: Path) -> dict[str, Any]:

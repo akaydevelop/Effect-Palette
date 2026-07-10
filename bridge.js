@@ -20,7 +20,7 @@ const PROJECT_ITEMS_FILE = path.join(DATA_DIR, "premiere_project_items.json");
 const FAVORITES_FILE = path.join(DATA_DIR, "premiere_favorites.json");
 const SEQUENCES_FILE = path.join(DATA_DIR, "premiere_sequences.json");
 const HOST_INFO_FILE = path.join(DATA_DIR, "premiere_host_info.json");
-const CMD_FILE      = path.join(DATA_DIR, "premiere_cmd.json");
+const LEGACY_CMD_FILE = path.join(DATA_DIR, "premiere_cmd.json");
 const LOG_FILE      = path.join(DATA_DIR, "premiere_diagnose.txt");
 const WORKER_LOG_FILE = path.join(DATA_DIR, "worker.log");
 const SELECTION_FILE = path.join(DATA_DIR, "current_selection.json");
@@ -82,6 +82,8 @@ let lastProjectIdentity = "";
 let lastProjectIdentityCheckAt = 0;
 let lastProjectItemsRefreshAt = 0;
 let projectItemsRefreshPending = false;
+let activeV2Completion = null;
+let commandBridgeV2 = null;
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
@@ -613,7 +615,80 @@ function maybeRefreshProjectItems() {
   }
 }
 
-// ─── 3. Polling ───────────────────────────────────────────────────────────────
+// ─── 3. Polling e fila de comandos ───────────────────────────────────────────
+
+function dispatchCommand(cmd) {
+  if (cmd.command === "applyEffect") {
+    applyEffect(cmd);
+  } else if (cmd.command === "applyTransition") {
+    applyTransition(cmd);
+  } else if (cmd.command === "applyPreset") {
+    applyPreset(cmd);
+  } else if (cmd.command === "insertProjectItem") {
+    insertProjectItem(cmd);
+  } else if (cmd.command === "insertGenericItem") {
+    insertGenericItem(cmd);
+  } else if (cmd.command === "insertFavoriteItem") {
+    insertFavoriteItem(cmd);
+  } else if (cmd.command === "exportEffects") {
+    markCmdStatus("processing");
+    exportHostInfo("manual");
+    exportEffects();
+    exportPresets();
+    exportProjectItems("manual");
+    exportFavorites("manual");
+    exportSequences("manual");
+    markCmdStatus("done");
+  } else if (cmd.command === "diagnose") {
+    markCmdStatus("processing");
+    evalHostScript("diagnose()", function(result) {
+      writeSafe(LOG_FILE, result);
+      log("Diagnóstico gravado", "ok");
+      markCmdStatus("done");
+    });
+  } else if (cmd.command === "clearBridge") {
+    clearLogFiles();
+    log("Bridge e logs limpos", "ok");
+    markCmdStatus("done");
+  } else {
+    log("Comando desconhecido: " + cmd.command, "err");
+    markCmdStatus("error");
+  }
+}
+
+function dispatchV2Envelope(envelope, complete) {
+  const cmd = Object.assign({ command: envelope.command }, envelope.payload || {});
+  activeV2Completion = complete;
+  const needsSelection = [
+    "applyEffect",
+    "applyTransition",
+    "applyPreset",
+    "insertProjectItem",
+    "insertGenericItem",
+    "insertFavoriteItem"
+  ].indexOf(cmd.command) >= 0;
+
+  if (!needsSelection) {
+    dispatchCommand(cmd);
+    return;
+  }
+
+  evalHostScript("getSelectionJSON()", function(selJSON) {
+    if (selJSON && selJSON !== "EvalScript error.") {
+      lastSelectionJSON = selJSON;
+      selectionTimestamp = Date.now();
+      if (selJSON !== lastSelectionWrite) {
+        try {
+          writeSafe(SELECTION_FILE, selJSON);
+          lastSelectionWrite = selJSON;
+        } catch (_) {}
+      }
+    } else {
+      lastSelectionJSON = "[]";
+    }
+    dispatchCommand(cmd);
+  });
+}
 
 function startPolling() {
   if (pollingActive) return;
@@ -623,72 +698,30 @@ function startPolling() {
     if (!pollingActive) return;
 
     try {
-      evalHostScript("getSelectionJSON()", function(selJSON) {
-        if (selJSON && selJSON !== "EvalScript error.") {
-          lastSelectionJSON  = selJSON;
-          selectionTimestamp = Date.now();
-          if (selJSON !== lastSelectionWrite) {
-            writeSafe(SELECTION_FILE, selJSON);
-            lastSelectionWrite = selJSON;
+      // Never race the advisory selection refresh against a command's
+      // authoritative selection request.
+      if (!activeV2Completion) {
+        evalHostScript("getSelectionJSON()", function(selJSON) {
+          if (selJSON && selJSON !== "EvalScript error.") {
+            lastSelectionJSON  = selJSON;
+            selectionTimestamp = Date.now();
+            if (selJSON !== lastSelectionWrite) {
+              writeSafe(SELECTION_FILE, selJSON);
+              lastSelectionWrite = selJSON;
+            }
           }
-        }
-      });
+        });
+      }
 
       maybeRefreshProjectItems();
 
-      if (fs.existsSync(CMD_FILE)) {
-        const raw = fs.readFileSync(CMD_FILE, "utf8");
-        const cmd = JSON.parse(raw);
-
-        if (cmd.status === "pending" && cmd.timestamp !== lastCmdTime) {
-          lastCmdTime = cmd.timestamp;
-
-          const selectionAge = Date.now() - selectionTimestamp;
-          if (selectionAge > 10000) lastSelectionJSON = "[]";
-
-          if (cmd.command === "applyEffect") {
-            applyEffect(cmd);
-          } else if (cmd.command === "applyTransition") {
-            applyTransition(cmd);
-          } else if (cmd.command === "applyPreset") {
-            applyPreset(cmd);
-          } else if (cmd.command === "insertProjectItem") {
-            insertProjectItem(cmd);
-          } else if (cmd.command === "insertGenericItem") {
-            insertGenericItem(cmd);
-          } else if (cmd.command === "insertFavoriteItem") {
-            insertFavoriteItem(cmd);
-          } else if (cmd.command === "exportEffects") {
-            markCmdStatus("processing");
-            exportHostInfo("manual");
-            exportEffects();
-            exportPresets();
-            exportProjectItems("manual");
-            exportFavorites("manual");
-            exportSequences("manual");
-            markCmdStatus("done");
-          } else if (cmd.command === "diagnose") {
-            markCmdStatus("processing");
-            evalHostScript("diagnose()", function(result) {
-      writeSafe(LOG_FILE, result);
-              log("Diagnóstico gravado", "ok");
-              markCmdStatus("done");
-            });
-          } else if (cmd.command === "clearBridge") {
-            markCmdStatus("done");
-            try { fs.unlinkSync(CMD_FILE); } catch(e) {}
-            clearLogFiles();
-            log("Bridge e logs limpos", "ok");
-          }
-        }
-      }
     } catch (e) { /* ignora erros de leitura */ }
 
-    setTimeout(poll, 300);
+    setTimeout(poll, 1000);
   }
 
   poll();
-  log("Polling iniciado (300ms)", "ok");
+  log("Atualizacao de selecao iniciada (1000ms)", "ok");
 }
 
 // ─── 4. Aplicar efeito ────────────────────────────────────────────────────────
@@ -982,22 +1015,21 @@ function insertFavoriteItem(cmd) {
 }
 
 function markCmdStatus(status) {
-  try {
-    if (fs.existsSync(CMD_FILE)) {
-      const cmd = JSON.parse(fs.readFileSync(CMD_FILE, "utf8"));
-      cmd.status = status;
-      writeSafe(CMD_FILE, JSON.stringify(cmd, null, 2));
-    }
-  } catch (e) {
-    fileLog("Erro em markCmdStatus: " + e.message);
+  if (activeV2Completion) {
+    if (status === "processing") return;
+    const completion = activeV2Completion;
+    activeV2Completion = null;
+    completion(status);
+    return;
   }
+  fileLog("Status sem comando v2 ativo ignorado: " + status);
 }
 
 // ─── Funções públicas ─────────────────────────────────────────────────────────
 
 function clearBridge() {
   try {
-    if (fs.existsSync(CMD_FILE)) fs.unlinkSync(CMD_FILE);
+    if (fs.existsSync(LEGACY_CMD_FILE)) fs.unlinkSync(LEGACY_CMD_FILE);
     clearLogFiles();
     log("Bridge e logs limpos", "ok");
   } catch (e) {
@@ -1019,11 +1051,23 @@ function init() {
   log("FX.palette " + (IS_DEBUG_PANEL ? "debug panel" : "worker") + " carregado");
 
   try {
-    if (fs.existsSync(CMD_FILE)) {
-      fs.unlinkSync(CMD_FILE);
-      log("Bridge anterior limpo");
+    if (fs.existsSync(LEGACY_CMD_FILE)) {
+      log("Bridge legado encontrado e ignorado", "warn");
     }
   } catch (e) {}
+
+  if (!IS_DEBUG_PANEL && window.EffectPaletteBridgeProtocol) {
+    commandBridgeV2 = window.EffectPaletteBridgeProtocol.createCommandBridge({
+      fs: fs,
+      path: path,
+      dataDir: DATA_DIR,
+      onError: function(stage, error) {
+        fileLog("Bridge v2 " + stage + ": " + (error && error.message ? error.message : error));
+      }
+    });
+    commandBridgeV2.start(dispatchV2Envelope);
+    log("Bridge de comandos v2 ativo", "ok");
+  }
 
   setTimeout(function() {
     exportHostInfo("startup");

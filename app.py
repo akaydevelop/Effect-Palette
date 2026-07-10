@@ -21,6 +21,8 @@ from tkinter import messagebox
 from typing import Callable
 
 import beta_report
+from effect_palette import native_windows
+from effect_palette.command_bus import CommandManager, CommandSnapshot, CommandState
 
 try:
     from pynput import keyboard
@@ -100,14 +102,11 @@ PREMIERE_PROCESS_NAMES = (
     "Adobe Premiere Pro.exe",
 )
 PROCESSENTRY32W_MAX_PATH = 260
-WM_HOTKEY = 0x0312
-WM_QUIT = 0x0012
-PM_NOREMOVE = 0x0000
-MOD_ALT = 0x0001
-MOD_CONTROL = 0x0002
-MOD_SHIFT = 0x0004
-MOD_WIN = 0x0008
-MOD_NOREPEAT = 0x4000
+WM_HOTKEY = native_windows.WM_HOTKEY
+WM_QUIT = native_windows.WM_QUIT
+PM_NOREMOVE = native_windows.PM_NOREMOVE
+MOD_CONTROL = native_windows.MOD_CONTROL
+MOD_NOREPEAT = native_windows.MOD_NOREPEAT
 VK_SPACE = 0x20
 VK_D = 0x44
 VK_Q = 0x51
@@ -125,8 +124,6 @@ PILL_ANIMATION_MS = 120
 INTERACTIVE_SETTLE_MS = 120
 DEBUG_PERF = False
 RESULTS_RENDER_OVERSCAN = 4
-QT_INITIAL_RENDER_ROWS = 16
-QT_RENDER_CHUNK_ROWS = 48
 USE_WINDOW_ALPHA = False
 FIXED_SEARCH_WINDOW_WIDTH = 760
 POINTER_WINDOW_MARGIN = 12
@@ -134,9 +131,6 @@ POINTER_VERTICAL_GAP = 18
 OPEN_FOCUS_ATTEMPTS = 2
 FOCUS_OUT_REBIND_MS = 850
 FOCUS_GRACE_SECONDS = 1.2
-APPLY_STATUS_INITIAL_DELAY_MS = 40
-APPLY_STATUS_POLL_MS = 60
-APPLY_STATUS_TIMEOUT_MS = 5000
 APPLY_SUCCESS_CLOSE_DELAY_MS = 300
 HEADER_PAD_X = 14
 HEADER_PAD_Y = 8
@@ -239,21 +233,10 @@ ITEM_TYPE_FILTER_KEYS = {
 for _generic_item in GENERIC_ITEMS:
     _generic_item["category"] = "Favoritos"
 
-IS_WINDOWS = os.name == "nt"
-
-if IS_WINDOWS:
-    try:
-        USER32 = ctypes.windll.user32
-        SW_SHOWNORMAL = 1
-        SW_RESTORE = 9
-    except Exception:
-        USER32 = None
-        SW_SHOWNORMAL = 1
-        SW_RESTORE = 9
-else:
-    USER32 = None
-    SW_SHOWNORMAL = 1
-    SW_RESTORE = 9
+IS_WINDOWS = native_windows.IS_WINDOWS
+USER32 = native_windows.USER32
+SW_SHOWNORMAL = 1
+SW_RESTORE = native_windows.SW_RESTORE
 
 
 @dataclass(frozen=True)
@@ -517,11 +500,14 @@ class LoaderSnapshot:
     exact_name_map: dict[str, tuple[int, ...]]
     prefix_map: dict[str, tuple[int, ...]]
     token_prefix_map: dict[str, tuple[int, ...]]
+    short_ngram_map: dict[str, tuple[int, ...]]
+    short_ranked_map: dict[str, tuple[int, ...]]
     trigram_map: dict[str, tuple[int, ...]]
     source: str
     mtimes: dict[str, float]
     connection_state: str
     load_issues: tuple[str, ...]
+    load_state: str
 
     @property
     def count(self) -> int:
@@ -569,6 +555,14 @@ def make_trigrams(value: str) -> tuple[str, ...]:
     if len(normalized) < 3:
         return ()
     return tuple(normalized[idx:idx + 3] for idx in range(len(normalized) - 2))
+
+
+def make_short_ngrams(value: str) -> tuple[str, ...]:
+    normalized = normalize_search_text(value)
+    grams = set(normalized)
+    grams.update(normalized[idx:idx + 2] for idx in range(max(0, len(normalized) - 1)))
+    grams.discard("")
+    return tuple(grams)
 
 
 def freeze_id_lists(mapping: dict[str, list[int]]) -> dict[str, tuple[int, ...]]:
@@ -682,7 +676,7 @@ def derive_connection_state(*, source: str, load_issues: tuple[str, ...]) -> str
 def get_connection_state_tokens(state: str) -> dict[str, str]:
     if state == "connected":
         color = GREEN
-    elif state == "problem":
+    elif state in {"problem", "loading"}:
         color = ORANGE
     else:
         color = OFFLINE
@@ -843,14 +837,36 @@ class TweenRunner:
 
 
 class EffectsLoader:
-    def __init__(self, paths: DataPaths | None = None):
+    def __init__(self, paths: DataPaths | None = None, *, defer_initial_load: bool = False):
         self.paths = paths or DataPaths()
         self._lock = threading.Lock()
         self._reload_lock = threading.Lock()
         self._reload_inflight = False
         self._reload_pending = False
         self._reload_force = False
-        self._snapshot = self._build_snapshot(force_reload=True)
+        self._snapshot = self._loading_snapshot() if defer_initial_load else self._build_snapshot(force_reload=True)
+
+    def _loading_snapshot(self) -> LoaderSnapshot:
+        return LoaderSnapshot(
+            effects=(),
+            presets=(),
+            project_items=(),
+            favorite_items=(),
+            generic_items=(),
+            all_items=(),
+            indexed_items=(),
+            exact_name_map={},
+            prefix_map={},
+            token_prefix_map={},
+            short_ngram_map={},
+            short_ranked_map={},
+            trigram_map={},
+            source="loading",
+            mtimes={},
+            connection_state="loading",
+            load_issues=(),
+            load_state="loading",
+        )
 
     @property
     def snapshot(self) -> LoaderSnapshot:
@@ -971,7 +987,15 @@ class EffectsLoader:
 
         generic_items = tuple(dict(item) for item in GENERIC_ITEMS)
         all_items = effects + presets + project_items + favorite_items + generic_items
-        indexed_items, exact_name_map, prefix_map, token_prefix_map, trigram_map = self._build_indexes(all_items)
+        (
+            indexed_items,
+            exact_name_map,
+            prefix_map,
+            token_prefix_map,
+            short_ngram_map,
+            short_ranked_map,
+            trigram_map,
+        ) = self._build_indexes(all_items)
 
         return LoaderSnapshot(
             effects=effects,
@@ -984,11 +1008,14 @@ class EffectsLoader:
             exact_name_map=exact_name_map,
             prefix_map=prefix_map,
             token_prefix_map=token_prefix_map,
+            short_ngram_map=short_ngram_map,
+            short_ranked_map=short_ranked_map,
             trigram_map=trigram_map,
             source=source,
             mtimes=mtimes,
             connection_state=derive_connection_state(source=source, load_issues=tuple(load_issues)),
             load_issues=tuple(load_issues),
+            load_state="ready",
         )
 
     def _load_effects(self) -> tuple[tuple[dict, ...], str, tuple[str, ...]]:
@@ -1088,6 +1115,7 @@ class EffectsLoader:
         exact_name_map: dict[str, list[int]] = {}
         prefix_map: dict[str, list[int]] = {}
         token_prefix_map: dict[str, list[int]] = {}
+        short_ngram_map: dict[str, list[int]] = {}
         trigram_map: dict[str, list[int]] = {}
 
         for idx, item in enumerate(items):
@@ -1107,14 +1135,39 @@ class EffectsLoader:
             for token in tokens:
                 for prefix in iter_prefixes(token):
                     token_prefix_map.setdefault(prefix, []).append(idx)
+            for ngram in make_short_ngrams(normalized_name):
+                short_ngram_map.setdefault(ngram, []).append(idx)
             for trigram in set(make_trigrams(normalized_name)):
                 trigram_map.setdefault(trigram, []).append(idx)
+
+        sort_key = lambda item_idx: (indexed_items[item_idx].normalized_name, indexed_items[item_idx].load_order)
+        for mapping in (exact_name_map, prefix_map, token_prefix_map, short_ngram_map, trigram_map):
+            for candidate_ids in mapping.values():
+                candidate_ids.sort(key=sort_key)
+
+        short_ranked_map: dict[str, tuple[int, ...]] = {}
+        for query, contains_ids in short_ngram_map.items():
+            seen: set[int] = set()
+            ranked: list[int] = []
+            for candidate_ids in (
+                exact_name_map.get(query, ()),
+                prefix_map.get(query, ()),
+                token_prefix_map.get(query, ()),
+                contains_ids,
+            ):
+                for item_idx in candidate_ids:
+                    if item_idx not in seen:
+                        seen.add(item_idx)
+                        ranked.append(item_idx)
+            short_ranked_map[query] = tuple(ranked)
 
         return (
             tuple(indexed_items),
             freeze_id_lists(exact_name_map),
             freeze_id_lists(prefix_map),
             freeze_id_lists(token_prefix_map),
+            freeze_id_lists(short_ngram_map),
+            short_ranked_map,
             freeze_id_lists(trigram_map),
         )
 
@@ -1125,6 +1178,23 @@ class EffectsLoader:
             return SearchResultSet(items=(), total_count=0, visible_count=0, query="")
 
         allowed_types = set(type_filters) if type_filters else None
+        if len(normalized_query) <= 2:
+            candidate_ids = snapshot.short_ranked_map.get(normalized_query, ())
+            if allowed_types is None:
+                ranked_ids = candidate_ids
+            else:
+                ranked_ids = tuple(
+                    idx for idx in candidate_ids
+                    if snapshot.indexed_items[idx].item_type in allowed_types
+                )
+            visible_ids = ranked_ids[:limit]
+            return SearchResultSet(
+                items=tuple(snapshot.indexed_items[idx].payload for idx in visible_ids),
+                total_count=len(ranked_ids),
+                visible_count=len(visible_ids),
+                query=normalized_query,
+            )
+
         prefix_key = normalized_query[:4]
         seen: set[int] = set()
         ranked_ids: list[int] = []
@@ -1146,7 +1216,6 @@ class EffectsLoader:
                 group.append(idx)
             if not group:
                 return
-            group.sort(key=sort_key)
             seen.update(group)
             ranked_ids.extend(group)
 
@@ -1162,9 +1231,9 @@ class EffectsLoader:
                     trigram_groups = []
                     break
                 trigram_groups.append(set(ids))
-            contains_candidates = list(set.intersection(*trigram_groups)) if trigram_groups else []
+            contains_candidates = sorted(set.intersection(*trigram_groups), key=sort_key) if trigram_groups else []
         else:
-            contains_candidates = list(range(len(snapshot.indexed_items)))
+            contains_candidates = ()
 
         append_group(contains_candidates, lambda item: normalized_query in item.normalized_name)
         visible_ids = ranked_ids[:limit]
@@ -1181,114 +1250,6 @@ class EffectsLoader:
             return file_path.stat().st_mtime
         except Exception:
             return 0.0
-
-
-def write_safe(file_path: Path, content: str):
-    tmp = file_path.with_suffix(file_path.suffix + ".tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(file_path)
-    except Exception:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise
-
-
-def send_command(effect: dict):
-    beta_report.write_event("command_queued", {
-        "name": effect.get("name", ""),
-        "type": effect.get("type", "video"),
-        "category": effect.get("category", ""),
-    })
-
-    if effect.get("type") == "preset":
-        payload = {
-            "command": "applyPreset",
-            "effect": effect["name"],
-            "filterPresetsJSON": json.dumps(effect.get("filterPresets", [])),
-            "timestamp": time.time(),
-            "status": "pending",
-        }
-    elif effect.get("type") == "project_item":
-        payload = {
-            "command": "insertProjectItem",
-            "itemName": effect["name"],
-            "nodeId": effect.get("nodeId", ""),
-            "itemType": effect.get("itemType", ""),
-            "timestamp": time.time(),
-            "status": "pending",
-        }
-    elif effect.get("type") == "generic_item":
-        payload = {
-            "command": "insertGenericItem",
-            "itemName": effect["name"],
-            "genericKey": effect.get("genericKey", ""),
-            "timestamp": time.time(),
-            "status": "pending",
-        }
-    elif effect.get("type") == "favorite_item":
-        payload = {
-            "command": "insertFavoriteItem",
-            "itemName": effect["name"],
-            "mediaPath": effect.get("mediaPath", ""),
-            "sequenceID": effect.get("sequenceID", ""),
-            "itemType": effect.get("itemType", ""),
-            "isSequence": effect.get("isSequence", False),
-            "favoriteType": effect.get("favoriteType", ""),
-            "sourceProjectPath": effect.get("sourceProjectPath", ""),
-            "timestamp": time.time(),
-            "status": "pending",
-        }
-    elif effect.get("type") in {"transition_video", "transition_audio"}:
-        payload = {
-            "command": "applyTransition",
-            "transitionName": effect["name"],
-            "transitionType": "audio" if effect.get("type") == "transition_audio" else "video",
-            "transitionPlacement": effect.get("transitionPlacement", "auto"),
-            "timestamp": time.time(),
-            "status": "pending",
-        }
-    else:
-        payload = {
-            "command": "applyEffect",
-            "effect": effect["name"],
-            "category": effect.get("category", ""),
-            "type": effect.get("type", "video"),
-            "timestamp": time.time(),
-            "status": "pending",
-        }
-    BRIDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    write_safe(BRIDGE_FILE, json.dumps(payload, indent=2))
-    print(f"[Bridge] Enviado: {effect['name']}")
-    return float(payload["timestamp"])
-
-
-def read_bridge_status(expected_timestamp: float | None) -> str | None:
-    """Read a bridge status only when it belongs to the command being tracked."""
-    if expected_timestamp is None:
-        return None
-    try:
-        with BRIDGE_FILE.open(encoding="utf-8") as file_obj:
-            payload = json.load(file_obj)
-        if not isinstance(payload, dict):
-            return None
-        if payload.get("timestamp") != expected_timestamp:
-            return None
-        status = payload.get("status")
-        return str(status) if status else None
-    except (OSError, ValueError, TypeError):
-        # The CEP worker may be replacing the file at this exact moment.
-        return None
-
-
-def bridge_status_is_terminal(status: str | None) -> bool:
-    return status == "done" or bool(status and status.startswith("error"))
-
-
-def bridge_status_is_success(status: str | None) -> bool:
-    return status == "done"
 
 
 def format_bridge_failure(status: str | None) -> str:
@@ -1430,17 +1391,6 @@ def premiere_is_running() -> bool:
     return False
 
 
-def send_debug_command(command: str):
-    payload = {
-        "command": command,
-        "timestamp": time.time(),
-        "status": "pending",
-    }
-    BRIDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    write_safe(BRIDGE_FILE, json.dumps(payload, indent=2))
-    print(f"[Bridge] Comando enviado: {command}")
-
-
 def preset_has_keyframes(effect: dict) -> bool:
     if effect.get("type") != "preset":
         return False
@@ -1475,53 +1425,19 @@ def selection_has_infinite_warning_targets(selection: list) -> bool:
 
 
 def foreground_window_title_native() -> str | None:
-    if not IS_WINDOWS or USER32 is None:
-        return None
-    try:
-        hwnd = USER32.GetForegroundWindow()
-        if not hwnd:
-            return None
-        length = USER32.GetWindowTextLengthW(hwnd)
-        if length <= 0:
-            return ""
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        USER32.GetWindowTextW(hwnd, buffer, length + 1)
-        return buffer.value
-    except Exception:
-        return None
+    return native_windows.foreground_window_title()
 
 
 def foreground_window_handle_native() -> int | None:
-    if not IS_WINDOWS or USER32 is None:
-        return None
-    try:
-        hwnd = USER32.GetForegroundWindow()
-        return int(hwnd) if hwnd else None
-    except Exception:
-        return None
+    return native_windows.foreground_window_handle()
 
 
 def window_is_minimized_native(hwnd: int | None) -> bool:
-    if not hwnd or USER32 is None:
-        return False
-    try:
-        return bool(USER32.IsIconic(hwnd))
-    except Exception:
-        return False
+    return native_windows.is_minimized(hwnd)
 
 
-def activate_window_handle_native(hwnd: int | None):
-    if not hwnd or USER32 is None:
-        return
-    try:
-        if window_is_minimized_native(hwnd):
-            USER32.ShowWindow(hwnd, SW_RESTORE)
-        USER32.BringWindowToTop(hwnd)
-        USER32.SetForegroundWindow(hwnd)
-        USER32.SetActiveWindow(hwnd)
-        USER32.SetFocus(hwnd)
-    except Exception:
-        pass
+def activate_window_handle_native(hwnd: int | None) -> bool:
+    return native_windows.activate_window(hwnd)
 
 
 def premiere_is_focused() -> bool:
@@ -1547,6 +1463,9 @@ class DataFilesChangeHandler(FileSystemEventHandler):
         if getattr(event, "is_directory", False):
             return
         for raw_path in (getattr(event, "src_path", ""), getattr(event, "dest_path", "")):
+            if raw_path and "commands" in Path(raw_path).parts and hasattr(self.palette, "schedule_command_refresh"):
+                self.palette.schedule_command_refresh()
+                return
             if raw_path and Path(raw_path).name in WATCHED_DATA_FILES:
                 self.palette.schedule_data_refresh()
                 return
@@ -2000,6 +1919,7 @@ class EffectPalette:
 
     def __init__(self):
         self.loader = EffectsLoader()
+        self.command_manager = CommandManager(EXT_DATA)
         self.root = None
         self.body_win = None
         self.is_open = False
@@ -2054,11 +1974,9 @@ class EffectPalette:
         self._feedback_prompt_shown = False
         self._apply_busy = False
         self._apply_poll_job = None
-        self._apply_command_timestamp = None
-        self._apply_started_at = None
-        self._apply_last_status = None
         self._current_apply_effect: dict = {}
         self._build()
+        self.command_manager.subscribe(self._on_command_snapshot)
         self._start_file_watcher()
         self._start_premiere_monitor()
         self.root.after(0, self._prime_first_show)
@@ -2147,7 +2065,7 @@ class EffectPalette:
         self._body_host_bg = WINDOW_MASK_COLOR if self._body_mask_enabled else BG
         self.body_win.bind("<FocusIn>", self._on_focus_in)
         self.body_win.bind("<FocusOut>", self._on_focus_out)
-        self.body_win.bind("<Escape>", lambda e: self.hide())
+        self.body_win.bind("<Escape>", lambda e: self.dismiss())
 
         body_outer = tk.Frame(self.body_win, bg=self._body_host_bg)
         body_outer.pack(fill="both", expand=True)
@@ -2196,10 +2114,25 @@ class EffectPalette:
             font=(self.ui_font_family, 8),
             anchor="w",
         ).pack(side="left", pady=1)
+        self.stop_command_btn = tk.Button(
+            self.footer,
+            text="Parar",
+            command=self._stop_active_command,
+            bg=BG2,
+            fg=TEXT,
+            activebackground=ROW_HOVER,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=2,
+            font=(self.ui_font_family, 8, "bold"),
+            cursor="hand2",
+        )
         self.status_label = tk.Label(self.footer, text="", bg=BG, fg=ACCENT, font=(self.ui_font_family, 8, "bold"))
         self.status_label.pack(side="right")
 
-        self.entry.bind("<Escape>", lambda e: self.hide())
+        self.entry.bind("<Escape>", lambda e: self.dismiss())
         self.entry.bind("<Control-w>", lambda e: self.hide())
         self.entry.bind("<Return>", lambda e: self._apply_selected())
         self.entry.bind("<Down>", lambda e: self._move_selection(1))
@@ -2557,11 +2490,13 @@ class EffectPalette:
             self._prepare_for_next_show(force=True)
 
     def _manual_refresh(self):
-        if self._apply_busy:
+        if self.command_manager.snapshot.active:
             return
-        send_debug_command("exportEffects")
-        self.status_label.config(text="Solicitando atualizacao ao Premiere...")
-        self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
+        try:
+            self.command_manager.submit("exportEffects")
+            self.status_label.config(text="Solicitando atualizacao ao Premiere...")
+        except RuntimeError as exc:
+            self.status_label.config(text=str(exc))
 
     def _resolve_type_filters(self) -> set[str] | None:
         if self._active_category is None:
@@ -2799,45 +2734,20 @@ class EffectPalette:
 
     def _poll_apply_status(self):
         self._apply_poll_job = None
-        if not self._apply_busy:
-            return
-        status = read_bridge_status(self._apply_command_timestamp)
-        if status and status != self._apply_last_status:
-            self._apply_last_status = status
-            beta_report.write_event("apply_status_changed", {
-                "name": self._current_apply_effect.get("name", ""),
-                "status": status,
-            })
-        if status and bridge_status_is_terminal(status):
-            self._complete_apply(status)
-            return
-        if self._apply_started_at is not None:
-            elapsed_ms = (time.perf_counter() - self._apply_started_at) * 1000.0
-            if elapsed_ms >= APPLY_STATUS_TIMEOUT_MS:
-                self._apply_busy = False
-                self.entry.configure(state="normal")
-                self.status_label.config(text="Premiere nao respondeu")
-                beta_report.write_event("apply_timeout", {
-                    "name": self._current_apply_effect.get("name", ""),
-                    "elapsed_ms": round(elapsed_ms, 2),
-                })
-                return
-        self._apply_poll_job = self.root.after(APPLY_STATUS_POLL_MS, self._poll_apply_status)
+        snapshot = self.command_manager.poll()
+        if snapshot.state in {CommandState.QUEUED, CommandState.PROCESSING}:
+            self._apply_poll_job = self.root.after(100, self._poll_apply_status)
 
     def _complete_apply(self, status: str):
         self._apply_poll_job = None
         effect_name = self._current_apply_effect.get("name", "")
-        elapsed_ms = None
-        if self._apply_started_at is not None:
-            elapsed_ms = round((time.perf_counter() - self._apply_started_at) * 1000.0, 2)
         self._apply_busy = False
         self.entry.configure(state="normal")
-        if bridge_status_is_success(status):
+        if status == "done":
             self.status_label.config(text=f"[Aplicado] {effect_name}")
             beta_report.write_event("apply_completed", {
                 "name": effect_name,
                 "status": status,
-                "elapsed_ms": elapsed_ms,
             })
             self.root.after(APPLY_SUCCESS_CLOSE_DELAY_MS, self.hide)
         else:
@@ -2845,7 +2755,6 @@ class EffectPalette:
             beta_report.write_event("apply_failed", {
                 "name": effect_name,
                 "status": status,
-                "elapsed_ms": elapsed_ms,
             })
 
     def _begin_apply(self, effect: dict):
@@ -2854,27 +2763,57 @@ class EffectPalette:
         self._set_apply_busy(True, f"{self._apply_action_label(effect)}: {name}")
         self.root.update_idletasks()
         try:
-            self._apply_command_timestamp = send_command(effect)
+            envelope = self.command_manager.submit_effect(effect)
         except Exception as exc:
             self._apply_busy = False
             self.entry.configure(state="normal")
-            self.status_label.config(text="Falha ao enviar comando")
-            beta_report.log_exception("Apply command failed", exc)
+            self.status_label.config(text=str(exc) or "Falha ao enviar comando")
             return
-        self._apply_started_at = time.perf_counter()
-        self._apply_last_status = None
         beta_report.write_event("apply_started", {
             "name": name,
             "type": effect.get("type", ""),
-            "timestamp": self._apply_command_timestamp,
+            "command_id": envelope.command_id,
         })
-        self._apply_poll_job = self.root.after(
-            APPLY_STATUS_INITIAL_DELAY_MS,
-            self._poll_apply_status,
-        )
+        self._apply_poll_job = self.root.after(100, self._poll_apply_status)
+
+    def _stop_active_command(self):
+        previous_state = self.command_manager.stop_active()
+        if previous_state is None:
+            return
+        if self.stop_command_btn.winfo_manager():
+            self.stop_command_btn.pack_forget()
+        self._set_apply_busy(False)
+        if previous_state == CommandState.QUEUED:
+            message = "Aplicacao cancelada"
+        else:
+            message = "Espera interrompida - o Premiere ainda pode concluir"
+        self.status_label.config(text=message)
+        self.entry.focus_set()
+        beta_report.write_event("apply_stopped", {"previous_state": previous_state.value})
+
+    def _on_command_snapshot(self, snapshot: CommandSnapshot):
+        if self.stop_command_btn.winfo_manager():
+            self.stop_command_btn.pack_forget()
+        if snapshot.state in {CommandState.QUEUED, CommandState.PROCESSING}:
+            name = ""
+            if snapshot.envelope:
+                payload = snapshot.envelope.payload
+                name = str(payload.get("effect") or payload.get("itemName") or payload.get("transitionName") or "")
+            self._set_apply_busy(True, f"Aplicando: {name}")
+            self.stop_command_btn.pack(side="right", padx=(8, 0))
+            return
+        if snapshot.state == CommandState.SUCCEEDED:
+            self._complete_apply("done")
+            self.command_manager.clear_terminal()
+        elif snapshot.state == CommandState.FAILED:
+            status = snapshot.result.status if snapshot.result else "error"
+            self._complete_apply(status)
+        elif snapshot.state == CommandState.UNKNOWN:
+            self._set_apply_busy(False)
+            self.status_label.config(text=snapshot.worker_detail or "Resposta perdida - confira a timeline")
 
     def _apply_selected(self):
-        if self._apply_busy:
+        if self.command_manager.snapshot.active:
             return
         if not self._results_visible():
             return
@@ -3292,18 +3231,12 @@ class EffectPalette:
             self._focus_out_grace_until = time.monotonic() + 0.25
             self._force_focus_attempt(0)
             return
-        self.hide()
+        self.dismiss()
 
     def _activate_window_native(self):
-        if USER32 is None:
-            return
         try:
             hwnd = int(self.root.winfo_id())
-            USER32.ShowWindow(hwnd, SW_SHOWNORMAL)
-            USER32.BringWindowToTop(hwnd)
-            USER32.SetForegroundWindow(hwnd)
-            USER32.SetActiveWindow(hwnd)
-            USER32.SetFocus(hwnd)
+            activate_window_handle_native(hwnd)
         except Exception:
             pass
 
@@ -3414,6 +3347,10 @@ class EffectPalette:
         self._animate_open()
         self.root.after(FOCUS_OUT_REBIND_MS, lambda: self.root.bind("<FocusOut>", self._on_focus_out))
         self._has_shown_once = True
+        snapshot = self.command_manager.poll(notify=False)
+        self._on_command_snapshot(snapshot)
+        if snapshot.active and self._apply_poll_job is None:
+            self._apply_poll_job = self.root.after(100, self._poll_apply_status)
 
     def hide(self):
         if self._apply_busy or not self.is_open or self._is_closing:
@@ -3423,6 +3360,16 @@ class EffectPalette:
         self._cancel_focus_out_job()
         self.tweens.cancel("window_open")
         self._animate_close()
+
+    def dismiss(self):
+        active = self.command_manager.snapshot.active
+        self._apply_busy = False
+        try:
+            self.entry.configure(state="normal")
+        except Exception:
+            pass
+        self.hide()
+        self._apply_busy = active
 
     def hide_to_tray(self):
         self.hide()
@@ -3506,6 +3453,9 @@ class EffectPalette:
                 pass
             self._data_observer = None
 
+        self.command_manager.unsubscribe(self._on_command_snapshot)
+        self.command_manager.cleanup()
+
         if self.tray_controller is not None:
             try:
                 self.tray_controller.stop()
@@ -3522,6 +3472,7 @@ class EffectPalette:
 if HAS_QT:
     class QtRootAdapter(QtCore.QObject):
         _schedule_requested = QtCore.Signal(int, int)
+        _cancel_requested = QtCore.Signal(int)
         _post_requested = QtCore.Signal(object)
 
         def __init__(self, app: QtWidgets.QApplication):
@@ -3531,15 +3482,20 @@ if HAS_QT:
             self._callbacks: dict[int, Callable] = {}
             self._timers: dict[int, QtCore.QTimer] = {}
             self._destroyed = False
+            self._lock = threading.RLock()
             self._schedule_requested.connect(self._start_timer, QtCore.Qt.ConnectionType.QueuedConnection)
+            self._cancel_requested.connect(self._cancel_timer, QtCore.Qt.ConnectionType.QueuedConnection)
             self._post_requested.connect(self._run_post, QtCore.Qt.ConnectionType.QueuedConnection)
 
         def after(self, delay_ms: int, callback=None, *args):
             if callback is None:
                 return None
-            job_id = self._next_job_id
-            self._next_job_id += 1
-            self._callbacks[job_id] = lambda: callback(*args)
+            with self._lock:
+                if self._destroyed:
+                    return None
+                job_id = self._next_job_id
+                self._next_job_id += 1
+                self._callbacks[job_id] = lambda: callback(*args)
             self._schedule_requested.emit(max(0, int(delay_ms)), job_id)
             return job_id
 
@@ -3547,14 +3503,21 @@ if HAS_QT:
             return self.after(0, callback, *args)
 
         def post(self, callback=None, *args):
-            if callback is None or self._destroyed:
+            with self._lock:
+                unavailable = callback is None or self._destroyed
+            if unavailable:
                 return
             self._post_requested.emit(lambda: callback(*args))
 
         def after_cancel(self, job_id):
             if job_id is None:
                 return
-            self._callbacks.pop(job_id, None)
+            with self._lock:
+                self._callbacks.pop(job_id, None)
+            self._cancel_requested.emit(int(job_id))
+
+        @QtCore.Slot(int)
+        def _cancel_timer(self, job_id: int):
             timer = self._timers.pop(job_id, None)
             if timer is not None:
                 timer.stop()
@@ -3562,16 +3525,20 @@ if HAS_QT:
 
         @QtCore.Slot(int, int)
         def _start_timer(self, delay_ms: int, job_id: int):
-            if job_id not in self._callbacks or self._destroyed:
-                return
+            with self._lock:
+                if job_id not in self._callbacks or self._destroyed:
+                    return
             timer = QtCore.QTimer(self)
             timer.setSingleShot(True)
 
             def fire():
                 self._timers.pop(job_id, None)
-                callback = self._callbacks.pop(job_id, None)
+                with self._lock:
+                    callback = self._callbacks.pop(job_id, None)
                 timer.deleteLater()
-                if callback is not None and not self._destroyed:
+                with self._lock:
+                    available = callback is not None and not self._destroyed
+                if available:
                     callback()
 
             timer.timeout.connect(fire)
@@ -3580,7 +3547,9 @@ if HAS_QT:
 
         @QtCore.Slot(object)
         def _run_post(self, callback):
-            if not self._destroyed:
+            with self._lock:
+                available = not self._destroyed
+            if available:
                 callback()
 
         def winfo_exists(self):
@@ -3613,84 +3582,123 @@ if HAS_QT:
             return self.app.exec()
 
         def destroy(self):
-            self._destroyed = True
-            for job_id in list(self._callbacks):
+            with self._lock:
+                self._destroyed = True
+                job_ids = list(self._callbacks)
+            for job_id in job_ids:
                 self.after_cancel(job_id)
             self.app.quit()
 
 
-    class QtResultRowWidget(QtWidgets.QFrame):
-        def __init__(self, model: ResultRowModel, parent=None):
+    class ResultListModel(QtCore.QAbstractListModel):
+        ModelRole = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+        PayloadRole = ModelRole + 1
+        TitleRole = ModelRole + 2
+        SubtitleRole = ModelRole + 3
+        TypeLabelRole = ModelRole + 4
+        IconKindRole = ModelRole + 5
+        AccentKindRole = ModelRole + 6
+        FavoriteRole = ModelRole + 7
+
+        def __init__(self, parent=None):
             super().__init__(parent)
-            self.model = model
-            self.setObjectName("resultRow")
-            self.setFixedHeight(PaletteLayoutMetrics().row_height)
-            self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            self._rows: tuple[ResultRowModel, ...] = ()
 
-            layout = QtWidgets.QHBoxLayout(self)
-            layout.setContentsMargins(16, 6, 10, 6)
-            layout.setSpacing(10)
+        def rowCount(self, parent=QtCore.QModelIndex()):
+            return 0 if parent.isValid() else len(self._rows)
 
-            self.icon = QtWidgets.QLabel(get_icon_glyph(model.icon_kind))
-            self.icon.setObjectName("rowIcon")
-            self.icon.setFixedWidth(20)
-            self.icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(self.icon)
+        def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
+            if not index.isValid() or not 0 <= index.row() < len(self._rows):
+                return None
+            row = self._rows[index.row()]
+            values = {
+                self.ModelRole: row,
+                self.PayloadRole: row.payload,
+                self.TitleRole: row.title,
+                self.SubtitleRole: row.subtitle,
+                self.TypeLabelRole: row.type_label,
+                self.IconKindRole: row.icon_kind,
+                self.AccentKindRole: row.accent_kind,
+                self.FavoriteRole: row.is_favorite,
+                int(QtCore.Qt.ItemDataRole.DisplayRole): row.title,
+            }
+            return values.get(int(role))
 
-            text_layout = QtWidgets.QVBoxLayout()
-            text_layout.setContentsMargins(0, 0, 0, 0)
-            text_layout.setSpacing(1)
-            self.title = QtWidgets.QLabel(model.title)
-            self.title.setObjectName("rowTitle")
-            self.title.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.NoTextInteraction)
-            self.subtitle = QtWidgets.QLabel(model.subtitle)
-            self.subtitle.setObjectName("rowSubtitle")
-            self.subtitle.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.NoTextInteraction)
-            text_layout.addWidget(self.title)
-            text_layout.addWidget(self.subtitle)
-            layout.addLayout(text_layout, 1)
+        def flags(self, index):
+            if not index.isValid():
+                return QtCore.Qt.ItemFlag.NoItemFlags
+            return QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable
 
-            self.badge = QtWidgets.QLabel(model.type_label)
-            self.badge.setObjectName("rowBadge")
-            self.badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(self.badge)
-            self.apply_state(selected=False)
+        def set_rows(self, rows):
+            self.beginResetModel()
+            self._rows = tuple(rows)
+            self.endResetModel()
 
-        def apply_state(self, *, selected: bool):
-            tokens = get_row_visual_tokens(self.model.accent_kind, selected=selected, hovered=False)
-            self.setStyleSheet(
-                f"""
-                QFrame#resultRow {{
-                    background: {tokens["bg"]};
-                    border: 1px solid {tokens["border"]};
-                    border-radius: 12px;
-                }}
-                QLabel#rowTitle {{
-                    color: {tokens["title_fg"]};
-                    font-weight: 700;
-                    background: transparent;
-                }}
-                QLabel#rowSubtitle {{
-                    color: {tokens["subtitle_fg"]};
-                    font-size: 11px;
-                    background: transparent;
-                }}
-                QLabel#rowIcon {{
-                    color: {tokens["icon_fg"]};
-                    background: transparent;
-                    font-size: 14px;
-                }}
-                QLabel#rowBadge {{
-                    color: {tokens["type_fg"]};
-                    background: {tokens["type_bg"]};
-                    border-radius: 4px;
-                    padding: 2px 8px;
-                    font-size: 11px;
-                    font-weight: 700;
-                }}
-                """
-            )
+        def row_model(self, row: int) -> ResultRowModel | None:
+            if 0 <= row < len(self._rows):
+                return self._rows[row]
+            return None
 
+
+    class ResultItemDelegate(QtWidgets.QStyledItemDelegate):
+        def __init__(self, font_family: str, parent=None):
+            super().__init__(parent)
+            self.font_family = font_family
+            self.metrics = PaletteLayoutMetrics()
+
+        def sizeHint(self, option, index):
+            return QtCore.QSize(max(1, option.rect.width()), self.metrics.row_height + 4)
+
+        def paint(self, painter, option, index):
+            model = index.data(ResultListModel.ModelRole)
+            if model is None:
+                return
+            selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+            hovered = bool(option.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+            tokens = get_row_visual_tokens(model.accent_kind, selected=selected, hovered=hovered)
+            card = option.rect.adjusted(5, 2, -5, -2)
+
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QtGui.QPen(QtGui.QColor(tokens["border"]), 1))
+            painter.setBrush(QtGui.QColor(tokens["bg"]))
+            painter.drawRoundedRect(QtCore.QRectF(card), 12, 12)
+
+            icon_rect = QtCore.QRect(card.left() + 13, card.top(), 28, card.height())
+            icon_font = QtGui.QFont("Segoe UI Symbol", 12)
+            icon_font.setBold(True)
+            painter.setFont(icon_font)
+            painter.setPen(QtGui.QColor(tokens["icon_fg"]))
+            painter.drawText(icon_rect, QtCore.Qt.AlignmentFlag.AlignCenter, get_icon_glyph(model.icon_kind))
+
+            badge_font = QtGui.QFont(self.font_family, 9)
+            badge_font.setBold(True)
+            badge_metrics = QtGui.QFontMetrics(badge_font)
+            badge_width = max(50, badge_metrics.horizontalAdvance(model.type_label) + 16)
+            badge_rect = QtCore.QRect(card.right() - badge_width - 10, card.center().y() - 10, badge_width, 20)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(tokens["type_bg"]))
+            painter.drawRoundedRect(QtCore.QRectF(badge_rect), 5, 5)
+            painter.setFont(badge_font)
+            painter.setPen(QtGui.QColor(tokens["type_fg"]))
+            painter.drawText(badge_rect, QtCore.Qt.AlignmentFlag.AlignCenter, model.type_label)
+
+            text_left = icon_rect.right() + 9
+            text_width = max(1, badge_rect.left() - text_left - 10)
+            title_font = QtGui.QFont(self.font_family, 10)
+            title_font.setBold(True)
+            subtitle_font = QtGui.QFont(self.font_family, 8)
+            title_metrics = QtGui.QFontMetrics(title_font)
+            subtitle_metrics = QtGui.QFontMetrics(subtitle_font)
+            title = title_metrics.elidedText(model.title, QtCore.Qt.TextElideMode.ElideRight, text_width)
+            subtitle = subtitle_metrics.elidedText(model.subtitle, QtCore.Qt.TextElideMode.ElideRight, text_width)
+            painter.setFont(title_font)
+            painter.setPen(QtGui.QColor(tokens["title_fg"]))
+            painter.drawText(QtCore.QRect(text_left, card.top() + 7, text_width, 18), QtCore.Qt.AlignmentFlag.AlignVCenter, title)
+            painter.setFont(subtitle_font)
+            painter.setPen(QtGui.QColor(tokens["subtitle_fg"]))
+            painter.drawText(QtCore.QRect(text_left, card.top() + 27, text_width, 15), QtCore.Qt.AlignmentFlag.AlignVCenter, subtitle)
+            painter.restore()
 
     class QtPaletteWindow(QtWidgets.QWidget):
         def __init__(self, palette):
@@ -3703,10 +3711,15 @@ if HAS_QT:
             )
             self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
+        def event(self, event):
+            if event.type() == QtCore.QEvent.Type.WindowDeactivate:
+                self.palette._schedule_focus_loss_close()
+            return super().event(event)
+
         def keyPressEvent(self, event):
             key = event.key()
             if key == QtCore.Qt.Key.Key_Escape:
-                self.palette.hide()
+                self.palette.dismiss()
                 return
             if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
                 self.palette._apply_selected()
@@ -3727,7 +3740,9 @@ if HAS_QT:
             self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
             self.app.setQuitOnLastWindowClosed(False)
             self.root = QtRootAdapter(self.app)
-            self.loader = EffectsLoader()
+            self.loader = EffectsLoader(defer_initial_load=True)
+            self._loader_ready = False
+            self.command_manager = CommandManager(EXT_DATA)
             self.is_open = False
             self._active_category = None
             self._current_results: list[dict] = []
@@ -3741,28 +3756,29 @@ if HAS_QT:
             self._premiere_seen = False
             self._premiere_seen_since = None
             self._feedback_prompt_shown = False
-            self._row_widgets: list[QtResultRowWidget] = []
-            self._render_chunk_job = None
-            self._render_generation = 0
             self._qt_middle_height = 0
             self._previous_foreground_hwnd = None
             self._focus_attempt_job = None
+            self._focus_loss_job = None
+            self._focus_close_grace_until = 0.0
             self._native_hwnd = None
             self._open_requested_at = None
             self._focus_reported = False
             self._apply_busy = False
             self._apply_finishing = False
-            self._apply_poll_job = None
             self._apply_close_job = None
-            self._apply_command_timestamp = None
-            self._apply_started_at = None
-            self._apply_last_status = None
             self._current_apply_effect: dict = {}
+            self._command_poll_job = None
+            self._handled_result_id = None
             self.tray_controller = None
             self._exiting = False
             self._build()
+            self.command_manager.subscribe(self._on_command_snapshot)
+            self._on_command_snapshot(self.command_manager.snapshot)
+            self._command_poll_job = self.root.after(100, self._poll_command_manager)
             self._start_file_watcher()
             self._start_premiere_monitor()
+            self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
 
         def _build(self):
             self._load_qt_fonts()
@@ -3770,6 +3786,9 @@ if HAS_QT:
             self.window = QtPaletteWindow(self)
             self.window.setObjectName("paletteWindow")
             self.window.setFixedWidth(FIXED_SEARCH_WINDOW_WIDTH)
+            self.escape_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Esc"), self.window)
+            self.escape_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            self.escape_shortcut.activated.connect(self.dismiss)
 
             root_layout = QtWidgets.QVBoxLayout(self.window)
             root_layout.setContentsMargins(0, 0, 0, 0)
@@ -3834,13 +3853,17 @@ if HAS_QT:
             self.empty_label = QtWidgets.QLabel("No results")
             self.empty_label.setObjectName("emptyLabel")
             self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            self.results_list = QtWidgets.QListWidget()
+            self.results_list = QtWidgets.QListView()
             self.results_list.setObjectName("resultsList")
-            self.results_list.setUniformItemSizes(False)
+            self.results_list.setUniformItemSizes(True)
+            self.results_list.setMouseTracking(True)
             self.results_list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
             self.results_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self.results_list.currentRowChanged.connect(self._sync_row_selection)
-            self.results_list.itemDoubleClicked.connect(lambda _item: self._apply_selected())
+            self.result_model = ResultListModel(self.results_list)
+            self.result_delegate = ResultItemDelegate(self.ui_font_family, self.results_list)
+            self.results_list.setModel(self.result_model)
+            self.results_list.setItemDelegate(self.result_delegate)
+            self.results_list.doubleClicked.connect(lambda _index: self._apply_selected())
             body_layout.addWidget(self.empty_label)
             body_layout.addWidget(self.results_list)
 
@@ -3858,10 +3881,21 @@ if HAS_QT:
             self.apply_progress.setTextVisible(False)
             self.apply_progress.setFixedSize(72, 4)
             self.apply_progress.hide()
+            self.stop_command_btn = QtWidgets.QPushButton("Parar")
+            self.stop_command_btn.setObjectName("stopCommandButton")
+            self.stop_command_btn.setToolTip("Interrompe a espera. Uma operacao ja iniciada no Premiere ainda pode terminar.")
+            self.stop_command_btn.clicked.connect(self._stop_active_command)
+            self.stop_command_btn.hide()
+            self.release_command_btn = QtWidgets.QPushButton("Liberar")
+            self.release_command_btn.setObjectName("releaseCommandButton")
+            self.release_command_btn.clicked.connect(self._release_unknown_command)
+            self.release_command_btn.hide()
             footer_layout.addWidget(self.help_label)
             footer_layout.addStretch(1)
             footer_layout.addWidget(self.apply_progress)
             footer_layout.addWidget(self.status_label)
+            footer_layout.addWidget(self.stop_command_btn)
+            footer_layout.addWidget(self.release_command_btn)
             body_layout.addWidget(self.footer)
 
             self._apply_styles()
@@ -3928,13 +3962,13 @@ if HAS_QT:
                     background: {REFRESH_BUTTON_HOVER_BG};
                     border-color: {blend_colors(REFRESH_BUTTON_BORDER, ACCENT, 0.42)};
                 }}
-                QListWidget#resultsList {{
+                QListView#resultsList {{
                     background: {BG};
                     border: 0;
                     outline: 0;
                     padding: 6px;
                 }}
-                QListWidget#resultsList::item {{
+                QListView#resultsList::item {{
                     border: 0;
                     padding: 0;
                     margin: 0 0 4px 0;
@@ -3965,6 +3999,14 @@ if HAS_QT:
                 QProgressBar#applyProgress::chunk {{
                     background: {ACCENT};
                     border-radius: 2px;
+                }}
+                QPushButton#releaseCommandButton, QPushButton#stopCommandButton {{
+                    color: {TEXT};
+                    background: {REFRESH_BUTTON_BG};
+                    border: 1px solid {ORANGE};
+                    border-radius: 5px;
+                    padding: 3px 8px;
+                    font-size: 10px;
                 }}
                 QScrollBar:vertical {{
                     background: {BG};
@@ -4004,7 +4046,11 @@ if HAS_QT:
                 self._style_category_button(button, category, active)
 
         def _update_connection_indicator(self):
-            tokens = get_connection_state_tokens(self.loader.snapshot.connection_state)
+            state = self.loader.snapshot.connection_state
+            worker_ready, worker_detail = self.command_manager.worker_status()
+            if state != "loading" and not worker_ready:
+                state = "problem" if "desatualizado" in worker_detail else "offline"
+            tokens = get_connection_state_tokens(state)
             self.conn_dot.setStyleSheet(
                 f"background: {tokens['fill']}; border: 1px solid {tokens['outline']}; border-radius: 5px;"
             )
@@ -4026,6 +4072,8 @@ if HAS_QT:
             self._refresh_list()
 
         def _on_search_change(self, *_args):
+            if not self._loader_ready:
+                return
             if self._search_job is not None:
                 self.root.after_cancel(self._search_job)
                 self._search_job = None
@@ -4039,8 +4087,7 @@ if HAS_QT:
             if not query:
                 self._cancel_render_chunk()
                 self._current_row_models = []
-                self._row_widgets = []
-                self.results_list.clear()
+                self.result_model.set_rows(())
                 self.status_label.setText("")
                 self._set_idle_state()
                 self._resize_to_content()
@@ -4057,10 +4104,7 @@ if HAS_QT:
             self._resize_to_content()
 
         def _cancel_render_chunk(self):
-            self._render_generation += 1
-            if self._render_chunk_job is not None:
-                self.root.after_cancel(self._render_chunk_job)
-                self._render_chunk_job = None
+            return
 
         def _set_idle_state(self):
             self._qt_middle_height = 0
@@ -4089,56 +4133,126 @@ if HAS_QT:
         def _populate_results(self):
             self._cancel_render_chunk()
             self.results_list.setUpdatesEnabled(False)
-            self.results_list.clear()
-            self._row_widgets = []
-            self.results_list.setUpdatesEnabled(True)
-            generation = self._render_generation
-            self._append_result_rows(0, QT_INITIAL_RENDER_ROWS, generation)
-
-        def _append_result_rows(self, start: int, count: int, generation: int):
-            if generation != self._render_generation:
-                return
-            end = min(len(self._current_row_models), start + count)
-            self.results_list.setUpdatesEnabled(False)
             try:
-                for model in self._current_row_models[start:end]:
-                    item = QtWidgets.QListWidgetItem()
-                    item.setData(QtCore.Qt.ItemDataRole.UserRole, model.payload)
-                    item.setSizeHint(QtCore.QSize(FIXED_SEARCH_WINDOW_WIDTH - 34, PaletteLayoutMetrics().row_height + 4))
-                    self.results_list.addItem(item)
-                    row_widget = QtResultRowWidget(model)
-                    self.results_list.setItemWidget(item, row_widget)
-                    self._row_widgets.append(row_widget)
-                if start == 0 and self._row_widgets:
-                    self.results_list.setCurrentRow(0)
-                    self._sync_row_selection(0)
+                self.result_model.set_rows(self._current_row_models)
+                if self._current_row_models:
+                    self.results_list.setCurrentIndex(self.result_model.index(0, 0))
             finally:
                 self.results_list.setUpdatesEnabled(True)
-            if end < len(self._current_row_models):
-                self._render_chunk_job = self.root.after(
-                    1,
-                    lambda next_start=end, gen=generation: self._append_result_rows(next_start, QT_RENDER_CHUNK_ROWS, gen),
-                )
-            else:
-                self._render_chunk_job = None
-
-        def _sync_row_selection(self, selected_row: int):
-            for index, row in enumerate(self._row_widgets):
-                row.apply_state(selected=index == selected_row)
 
         def _move_selection(self, direction: int):
-            if not self._row_widgets:
+            if not self._current_row_models:
                 return
-            row = self.results_list.currentRow()
+            row = self.results_list.currentIndex().row()
             if row < 0:
                 row = 0
-            self.results_list.setCurrentRow(max(0, min(row + direction, len(self._row_widgets) - 1)))
+            next_row = max(0, min(row + direction, len(self._current_row_models) - 1))
+            index = self.result_model.index(next_row, 0)
+            self.results_list.setCurrentIndex(index)
+            self.results_list.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
 
         def _selected_payload(self):
-            row = self.results_list.currentRow()
+            row = self.results_list.currentIndex().row()
             if 0 <= row < len(self._current_row_models):
                 return self._current_row_models[row].payload
             return None
+
+        def _command_display_name(self, snapshot: CommandSnapshot) -> str:
+            if snapshot.envelope is None:
+                return ""
+            payload = snapshot.envelope.payload
+            return str(payload.get("effect") or payload.get("itemName") or payload.get("transitionName") or snapshot.envelope.command)
+
+        def _poll_command_manager(self):
+            self._command_poll_job = None
+            self.command_manager.poll()
+            self._command_poll_job = self.root.after(100, self._poll_command_manager)
+
+        def schedule_command_refresh(self):
+            self.root.post(self.command_manager.poll)
+
+        def _release_unknown_command(self):
+            self.command_manager.acknowledge_unknown()
+            self.release_command_btn.hide()
+            self._set_apply_busy(False)
+            self.status_label.setText("")
+            self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
+
+        def _stop_active_command(self):
+            previous_state = self.command_manager.stop_active()
+            if previous_state is None:
+                return
+            self.stop_command_btn.hide()
+            self._set_apply_busy(False)
+            if previous_state == CommandState.QUEUED:
+                message = "Aplicacao cancelada"
+            else:
+                message = "Espera interrompida - o Premiere ainda pode concluir"
+            self.status_label.setText(message)
+            self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
+            beta_report.write_event("apply_stopped", {
+                "previous_state": previous_state.value,
+            })
+
+        def _finish_manager_success(self):
+            self._apply_close_job = None
+            self._apply_finishing = False
+            if self.is_open:
+                self.hide()
+            self.command_manager.clear_terminal()
+
+        def _on_command_snapshot(self, snapshot: CommandSnapshot):
+            self._update_connection_indicator()
+            self.release_command_btn.hide()
+            self.stop_command_btn.hide()
+            name = self._command_display_name(snapshot)
+            if snapshot.state == CommandState.IDLE:
+                self._set_apply_busy(False)
+                if self.is_open and snapshot.worker_detail:
+                    self.status_label.setText(snapshot.worker_detail)
+                return
+            if snapshot.state in {CommandState.QUEUED, CommandState.PROCESSING}:
+                label = "Na fila" if snapshot.state == CommandState.QUEUED else "Aplicando"
+                self._current_apply_effect = {"name": name}
+                self._set_apply_busy(True, f"{label}: {name}")
+                self.stop_command_btn.show()
+                return
+            if snapshot.state == CommandState.UNKNOWN:
+                self._set_apply_busy(True)
+                self.apply_progress.hide()
+                self.status_label.setText(snapshot.worker_detail or "Resposta perdida - confira a timeline")
+                self.release_command_btn.show()
+                return
+
+            self._set_apply_busy(False)
+            result = snapshot.result
+            result_id = result.command_id if result else None
+            if snapshot.state == CommandState.SUCCEEDED:
+                self.status_label.setText(f"[Aplicado] {name}")
+                if result_id and result_id != self._handled_result_id:
+                    self._handled_result_id = result_id
+                    beta_report.write_event("apply_completed", {
+                        "name": name,
+                        "command_id": result_id,
+                        "status": result.status,
+                    })
+                    self._apply_finishing = True
+                    if self._apply_close_job is not None:
+                        self.root.after_cancel(self._apply_close_job)
+                    self._apply_close_job = self.root.after(APPLY_SUCCESS_CLOSE_DELAY_MS, self._finish_manager_success)
+                return
+
+            status = result.status if result else "error"
+            self.status_label.setText(format_bridge_failure(status))
+            if result_id and result_id != self._handled_result_id:
+                self._handled_result_id = result_id
+                beta_report.write_event("apply_failed", {
+                    "name": name,
+                    "command_id": result_id,
+                    "status": status,
+                })
+            if self.is_open:
+                self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
 
         def _apply_action_label(self, effect: dict) -> str:
             effect_type = effect.get("type")
@@ -4153,100 +4267,19 @@ if HAS_QT:
         def _set_apply_busy(self, busy: bool, label: str = ""):
             self._apply_busy = busy
             self.apply_progress.setVisible(busy)
-            self.entry.setEnabled(not busy)
-            self.refresh_btn.setEnabled(not busy)
+            controls_enabled = not busy and self._loader_ready
+            self.entry.setEnabled(True)
+            self.entry.setReadOnly(not controls_enabled)
+            self.refresh_btn.setEnabled(controls_enabled)
             for button in self.category_buttons.values():
-                button.setEnabled(not busy)
+                button.setEnabled(controls_enabled)
             if label:
                 self.status_label.setText(label)
 
-        def _cancel_apply_tracking(self):
-            if self._apply_poll_job is not None:
-                self.root.after_cancel(self._apply_poll_job)
-                self._apply_poll_job = None
-            if self._apply_close_job is not None:
-                self.root.after_cancel(self._apply_close_job)
-                self._apply_close_job = None
-            self._apply_command_timestamp = None
-            self._apply_started_at = None
-            self._apply_last_status = None
-
-        def _complete_apply(self, status: str):
-            self._apply_poll_job = None
-            elapsed_ms = None
-            if self._apply_started_at is not None:
-                elapsed_ms = round((time.perf_counter() - self._apply_started_at) * 1000.0, 2)
-            effect_name = ""
-            if self._current_apply_effect:
-                effect_name = self._current_apply_effect.get("name", "")
-            self.apply_progress.hide()
-            if bridge_status_is_success(status):
-                self.status_label.setText(f"[Aplicado] {effect_name}")
-                beta_report.write_event("apply_completed", {
-                    "name": effect_name,
-                    "status": status,
-                    "elapsed_ms": elapsed_ms,
-                })
-                self._apply_busy = True
-                self._apply_finishing = True
-                self._apply_close_job = self.root.after(
-                    APPLY_SUCCESS_CLOSE_DELAY_MS,
-                    self._finish_successful_apply,
-                )
-                return
-
-            self._apply_busy = False
+        def _reset_apply_ui(self):
             self._apply_finishing = False
-            self.entry.setEnabled(True)
-            self.refresh_btn.setEnabled(True)
-            for button in self.category_buttons.values():
-                button.setEnabled(True)
-            self.status_label.setText(format_bridge_failure(status))
-            beta_report.write_event("apply_failed", {
-                "name": effect_name,
-                "status": status,
-                "elapsed_ms": elapsed_ms,
-            })
-            self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
-
-        def _finish_successful_apply(self):
-            self._apply_close_job = None
-            self._apply_busy = False
-            self._apply_finishing = False
-            self.hide()
-
-        def _poll_apply_status(self):
-            self._apply_poll_job = None
-            if not self._apply_busy:
-                return
-            status = read_bridge_status(self._apply_command_timestamp)
-            if status and status != self._apply_last_status:
-                self._apply_last_status = status
-                beta_report.write_event("apply_status_changed", {
-                    "name": self._current_apply_effect.get("name", ""),
-                    "status": status,
-                })
-            if status and bridge_status_is_terminal(status):
-                self._complete_apply(status)
-                return
-            if self._apply_started_at is not None:
-                elapsed_ms = (time.perf_counter() - self._apply_started_at) * 1000.0
-                if elapsed_ms >= APPLY_STATUS_TIMEOUT_MS:
-                    self._apply_busy = False
-                    self._apply_finishing = False
-                    self.apply_progress.hide()
-                    self.entry.setEnabled(True)
-                    self.refresh_btn.setEnabled(True)
-                    for button in self.category_buttons.values():
-                        button.setEnabled(True)
-                    self.status_label.setText("Premiere nao respondeu")
-                    beta_report.write_event("apply_timeout", {
-                        "name": self._current_apply_effect.get("name", ""),
-                        "elapsed_ms": round(elapsed_ms, 2),
-                    })
-                    self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
-                    return
-            self._apply_poll_job = self.root.after(APPLY_STATUS_POLL_MS, self._poll_apply_status)
+            self._set_apply_busy(False)
+            self._current_apply_effect = {}
 
         def _begin_apply(self, effect: dict):
             action = self._apply_action_label(effect)
@@ -4255,31 +4288,19 @@ if HAS_QT:
             self._set_apply_busy(True, f"{action}: {name}")
             self.app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
             try:
-                self._apply_command_timestamp = send_command(effect)
+                envelope = self.command_manager.submit_effect(effect)
             except Exception as exc:
-                self._apply_busy = False
-                self.apply_progress.hide()
-                self.entry.setEnabled(True)
-                self.refresh_btn.setEnabled(True)
-                for button in self.category_buttons.values():
-                    button.setEnabled(True)
-                self.status_label.setText("Falha ao enviar comando")
-                beta_report.log_exception("Apply command failed", exc)
+                self._set_apply_busy(False)
+                self.status_label.setText(str(exc) or "Falha ao enviar comando")
                 return
-            self._apply_started_at = time.perf_counter()
-            self._apply_last_status = None
             beta_report.write_event("apply_started", {
                 "name": name,
                 "type": effect.get("type", ""),
-                "timestamp": self._apply_command_timestamp,
+                "command_id": envelope.command_id,
             })
-            self._apply_poll_job = self.root.after(
-                APPLY_STATUS_INITIAL_DELAY_MS,
-                self._poll_apply_status,
-            )
 
         def _apply_selected(self):
-            if self._apply_busy or self._apply_finishing:
+            if self.command_manager.snapshot.active or self._apply_finishing:
                 return
             effect = self._selected_payload()
             if not effect:
@@ -4298,17 +4319,26 @@ if HAS_QT:
             self._begin_apply(effect)
 
         def _manual_refresh(self):
-            if self._apply_busy or self._apply_finishing:
+            if self.command_manager.snapshot.active or self._apply_finishing:
                 return
-            send_debug_command("exportEffects")
-            self.status_label.setText("Solicitando atualizacao ao Premiere...")
-            self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
+            try:
+                self.command_manager.submit("exportEffects")
+                self.status_label.setText("Solicitando atualizacao ao Premiere...")
+            except RuntimeError as exc:
+                self.status_label.setText(str(exc))
 
         def _on_loader_snapshot_ready(self, snapshot: LoaderSnapshot):
+            self._loader_ready = snapshot.load_state == "ready"
             print(f"[Watcher] Lista atualizada - {snapshot.count} efeitos")
             self._update_connection_indicator()
             if self.is_open:
-                self._refresh_list()
+                if self._loader_ready:
+                    self._on_command_snapshot(self.command_manager.snapshot)
+                    self.status_label.setText("")
+                    self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
+                    self._refresh_list()
+                else:
+                    self.status_label.setText("Carregando indice...")
 
         def schedule_data_refresh(self):
             if self._data_refresh_job is not None:
@@ -4324,7 +4354,7 @@ if HAS_QT:
             if HAS_WATCHDOG:
                 handler = DataFilesChangeHandler(self)
                 self._data_observer = Observer()
-                self._data_observer.schedule(handler, str(self.loader.paths.data_dir), recursive=False)
+                self._data_observer.schedule(handler, str(self.loader.paths.data_dir), recursive=True)
                 self._data_observer.start()
                 return
 
@@ -4410,13 +4440,43 @@ if HAS_QT:
                 self._anchor_window_to_pointer()
 
         def _window_hwnd(self) -> int | None:
-            if self._native_hwnd:
+            if self._native_hwnd and native_windows.is_window(self._native_hwnd):
                 return self._native_hwnd
             try:
                 self._native_hwnd = int(self.window.winId())
                 return self._native_hwnd
             except Exception:
                 return None
+
+        def _cancel_focus_loss_close(self):
+            if self._focus_loss_job is None:
+                return
+            try:
+                self.root.after_cancel(self._focus_loss_job)
+            except Exception:
+                pass
+            self._focus_loss_job = None
+
+        def _schedule_focus_loss_close(self):
+            if not self.is_open:
+                return
+            self._cancel_focus_loss_close()
+            self._focus_loss_job = self.root.after(60, self._dismiss_if_inactive)
+
+        def _dismiss_if_inactive(self):
+            self._focus_loss_job = None
+            if not self.is_open or self.window.isActiveWindow():
+                return
+            remaining = self._focus_close_grace_until - time.monotonic()
+            if remaining > 0:
+                self._focus_loss_job = self.root.after(
+                    max(1, round(remaining * 1000.0)),
+                    self._dismiss_if_inactive,
+                )
+                return
+            if self.app.activeModalWidget() is not None or self.app.activePopupWidget() is not None:
+                return
+            self.dismiss()
 
         def _remember_previous_focus(self):
             previous = foreground_window_handle_native()
@@ -4425,21 +4485,26 @@ if HAS_QT:
                 self._previous_foreground_hwnd = previous
 
         def _activate_window_native(self):
-            activate_window_handle_native(self._window_hwnd())
+            return activate_window_handle_native(self._window_hwnd())
 
         def _force_focus_attempt(self, attempt: int = 0, max_attempts: int = OPEN_FOCUS_ATTEMPTS):
             if not self.is_open:
                 return
+            native_activated = False
             try:
                 self.window.show()
                 self.window.raise_()
                 self.window.activateWindow()
-                self._activate_window_native()
+                window_handle = self.window.windowHandle()
+                if window_handle is not None:
+                    window_handle.requestActivate()
+                native_activated = self._activate_window_native()
                 self.entry.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
             except Exception:
                 pass
             if self.entry.hasFocus():
                 self._cancel_focus_attempts()
+                self._cancel_focus_loss_close()
                 if not self._focus_reported:
                     self._focus_reported = True
                     elapsed_ms = None
@@ -4448,6 +4513,7 @@ if HAS_QT:
                     beta_report.write_event("palette_focus_acquired", {
                         "attempt": attempt,
                         "elapsed_ms": elapsed_ms,
+                        "native_activated": native_activated,
                     })
                     if self._open_requested_at is not None:
                         beta_report.write_event("palette_open_latency", {
@@ -4484,6 +4550,8 @@ if HAS_QT:
                 self.window.activateWindow()
                 self._force_focus_attempt()
                 return
+            self._cancel_focus_loss_close()
+            self._focus_close_grace_until = time.monotonic() + 0.18
             self._open_requested_at = invoked_at or time.perf_counter()
             self._focus_reported = False
             beta_report.write_event("palette_open_requested")
@@ -4498,9 +4566,13 @@ if HAS_QT:
             self._current_results = []
             self._current_row_models = []
             self._current_result_set = SearchResultSet(items=(), total_count=0, visible_count=0, query="")
-            self.results_list.clear()
+            self.result_model.set_rows(())
             self.status_label.setText("")
             self._set_idle_state()
+            self._on_command_snapshot(self.command_manager.poll(notify=False))
+            if not self._loader_ready:
+                self._set_apply_busy(False)
+                self.status_label.setText("Carregando indice...")
             self._anchor_window_to_pointer()
             self.window.setFixedSize(FIXED_SEARCH_WINDOW_WIDTH, self._idle_window_height)
             self.window.setWindowOpacity(0.92)
@@ -4509,12 +4581,11 @@ if HAS_QT:
             self._animate_window_opacity(1.0, OPEN_ANIMATION_MS, ease_out_expo)
 
         def hide(self):
-            if self._apply_busy:
-                return
             if not self.is_open:
                 return
             self.is_open = False
             self._cancel_focus_attempts()
+            self._cancel_focus_loss_close()
 
             def finish():
                 self.window.hide()
@@ -4523,7 +4594,19 @@ if HAS_QT:
 
             self._animate_window_opacity(0.0, CLOSE_ANIMATION_MS, ease_in_expo, finish)
 
+        def dismiss(self):
+            if not self.is_open:
+                return
+            self.hide()
+
         def _animate_window_opacity(self, target: float, duration_ms: int, easing, on_complete=None):
+            previous = getattr(self, "_opacity_animation", None)
+            if previous is not None:
+                try:
+                    previous.stop()
+                    previous.deleteLater()
+                except RuntimeError:
+                    pass
             start = self.window.windowOpacity()
             animation = QtCore.QVariantAnimation(self.window)
             animation.setDuration(duration_ms)
@@ -4532,7 +4615,12 @@ if HAS_QT:
             animation.valueChanged.connect(lambda value: self.window.setWindowOpacity(float(value)))
             if on_complete is not None:
                 animation.finished.connect(on_complete)
-            animation.finished.connect(animation.deleteLater)
+            def cleanup():
+                if getattr(self, "_opacity_animation", None) is animation:
+                    self._opacity_animation = None
+                animation.deleteLater()
+
+            animation.finished.connect(cleanup)
             animation.setEasingCurve(QtCore.QEasingCurve.Type.OutExpo if easing is ease_out_expo else QtCore.QEasingCurve.Type.InExpo)
             animation.start(QtCore.QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
             self._opacity_animation = animation
@@ -4563,9 +4651,9 @@ if HAS_QT:
                 "_data_refresh_job",
                 "_search_job",
                 "_premiere_monitor_job",
-                "_render_chunk_job",
                 "_focus_attempt_job",
-                "_apply_poll_job",
+                "_focus_loss_job",
+                "_command_poll_job",
                 "_apply_close_job",
             ):
                 job = getattr(self, job_name, None)
@@ -4579,6 +4667,8 @@ if HAS_QT:
                 except Exception:
                     pass
                 self._data_observer = None
+            self.command_manager.unsubscribe(self._on_command_snapshot)
+            self.command_manager.cleanup()
             if self.tray_controller is not None:
                 try:
                     self.tray_controller.stop()
@@ -4590,8 +4680,9 @@ if HAS_QT:
 
 
     class QtDebugWindow:
-        def __init__(self, root: QtRootAdapter):
+        def __init__(self, root: QtRootAdapter, command_manager: CommandManager):
             self.root = root
+            self.command_manager = command_manager
             self.win = None
             self.is_open = False
             self._poll_job = None
@@ -4646,8 +4737,11 @@ if HAS_QT:
             if command == "betaReport":
                 self._create_beta_report()
                 return
-            send_debug_command(command)
-            self.status_lbl.setText(f"-> {command}")
+            try:
+                self.command_manager.submit(command)
+                self.status_lbl.setText(f"-> {command}")
+            except RuntimeError as exc:
+                self.status_lbl.setText(str(exc))
 
         def _create_beta_report(self):
             try:
@@ -4687,8 +4781,9 @@ LOG_FILE = EXT_DATA / "worker.log"
 
 
 class DebugWindow:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, command_manager: CommandManager):
         self.root      = root
+        self.command_manager = command_manager
         self.win       = None
         self.is_open   = False
         self._poll_job = None
@@ -4809,8 +4904,11 @@ class DebugWindow:
         if command == "betaReport":
             self._create_beta_report()
             return
-        send_debug_command(command)
-        self.status_lbl.config(text=f"-> {command}", fg=ACCENT)
+        try:
+            self.command_manager.submit(command)
+            self.status_lbl.config(text=f"-> {command}", fg=ACCENT)
+        except RuntimeError as exc:
+            self.status_lbl.config(text=str(exc), fg=ORANGE)
 
     def _create_beta_report(self):
         try:
@@ -5095,20 +5193,12 @@ class HotkeyListener:
         return False
 
     def _run_native_hotkey_loop(self):
-        user32 = None
+        user32 = native_windows.USER32
         try:
             self._native_backend_unavailable = False
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
-            user32.RegisterHotKey.restype = wintypes.BOOL
-            user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
-            user32.UnregisterHotKey.restype = wintypes.BOOL
-            user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
-            user32.GetMessageW.restype = wintypes.BOOL
-            user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
-            user32.PeekMessageW.restype = wintypes.BOOL
-            kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+            kernel32 = native_windows.KERNEL32
+            if user32 is None or kernel32 is None:
+                raise RuntimeError("Win32 hotkey APIs unavailable")
 
             self._thread_id = int(kernel32.GetCurrentThreadId())
             msg = wintypes.MSG()
@@ -5191,10 +5281,8 @@ class HotkeyListener:
             thread_id = self._thread_id
             if thread_id is not None:
                 try:
-                    user32 = ctypes.WinDLL("user32", use_last_error=True)
-                    user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-                    user32.PostThreadMessageW.restype = wintypes.BOOL
-                    user32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
+                    if native_windows.USER32 is not None:
+                        native_windows.USER32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
                 except Exception as exc:
                     beta_report.log_exception("Failed to stop native hotkey thread", exc)
             self._thread.join(timeout=1.0)
@@ -5218,8 +5306,8 @@ def create_palette():
 
 def create_debug_window(palette):
     if HAS_QT and isinstance(palette, QtEffectPalette):
-        return QtDebugWindow(palette.root)
-    return DebugWindow(palette.root)
+        return QtDebugWindow(palette.root, palette.command_manager)
+    return DebugWindow(palette.root, palette.command_manager)
 
 
 # â”€â”€â”€ Ponto de entrada â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5231,30 +5319,42 @@ def main():
     print(f"  Debug      : {'Ctrl+D' if ENABLE_DEBUG_HOTKEY else 'menu da system tray'}")
     print(f"  Encerrar   : Ctrl+Q")
     print(f"  Efeitos    : {EFFECTS_FILE}")
-    print(f"  Bridge     : {BRIDGE_FILE}")
+    print(f"  Bridge v2  : {EXT_DATA / 'commands'}")
     print("=" * 52)
 
-    beta_report.start_session(APP_DIR, EXT_DATA)
-
-    palette = create_palette()
-    debug   = create_debug_window(palette)
-    tray    = SystemTrayController(palette, debug)
-    hotkey  = HotkeyListener(palette, debug)
-    hotkey.start()
-    tray.start()
-
+    instance_mutex = native_windows.SingleInstanceMutex("Local\\FX.palette.PremiereEffectPalette")
+    if not instance_mutex.acquire():
+        print("[App] FX.palette ja esta em execucao.")
+        return
+    palette = None
+    tray = None
+    hotkey = None
     try:
-        palette.run()
-    except KeyboardInterrupt:
-        print("\n[App] Encerrando...")
-        beta_report.write_event("keyboard_interrupt")
-    except Exception as exc:
-        beta_report.log_exception("Unhandled app exception", exc)
-        raise
+        beta_report.start_session(APP_DIR, EXT_DATA)
+        palette = create_palette()
+        debug = create_debug_window(palette)
+        tray = SystemTrayController(palette, debug)
+        hotkey = HotkeyListener(palette, debug)
+        hotkey.start()
+        tray.start()
+
+        try:
+            palette.run()
+        except KeyboardInterrupt:
+            print("\n[App] Encerrando...")
+            beta_report.write_event("keyboard_interrupt")
+        except Exception as exc:
+            beta_report.log_exception("Unhandled app exception", exc)
+            raise
     finally:
-        tray.stop()
-        palette.shutdown()
-        hotkey.stop()
+        if tray is not None:
+            tray.stop()
+        if hotkey is not None:
+            hotkey.stop()
+        if palette is not None:
+            palette.shutdown()
+        beta_report.shutdown_events()
+        instance_mutex.release()
 
 
 if __name__ == "__main__":

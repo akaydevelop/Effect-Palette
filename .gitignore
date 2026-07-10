@@ -18,6 +18,7 @@ data/premiere_presets.json
 data/premiere_project_items.json
 data/premiere_sequences.json
 data/worker.log
+data/commands/
 
 .debug
 template_project/*.prin
