@@ -11,6 +11,7 @@ Paleta flutuante para Adobe Premiere Pro, controlada por um app Python, com back
 - insere itens do projeto na timeline
 - insere built-ins do Premiere, como `Adjustment Layer`, `Bars and Tone`, `Black Video`, `Color Matte` e `Transparent Video`
 - insere favoritos customizados vindos do `template_project`
+- executa o comando nativo `Nest` nos clipes selecionados na timeline
 
 ## Estrutura principal
 
@@ -47,6 +48,10 @@ Paleta flutuante para Adobe Premiere Pro, controlada por um app Python, com back
 - `Adjustment Layer` por template: funcionando
 - sequencias do projeto: funcionando com reconstrucao do conteudo interno em muitos casos reais
 - presets animados em `Adjustment Layer` e imagens: funcionando via helper clip temporario + clonagem de componentes/keyframes
+- `Nest` unificado: configuracao inline na propria paleta para escolher `Automatico`, `Premiere` ou `API da extensao`
+- o modo automatico prefere a API para audio em varias faixas e o Premiere para selecoes simples
+- no modo Premiere, a extensao preenche e confirma automaticamente a janela nativa de nome
+- Nests recebem nome `FXN-001`, `FXN-002`... (ou nome personalizado) e sao movidas para `Nested Sequences`
 - modo beta fechada: gera relatorios locais em `Documents/FX.palette_Beta_Report`
 
 ## Beta fechada
@@ -73,7 +78,7 @@ Paleta flutuante para Adobe Premiere Pro, controlada por um app Python, com back
 
 - A configuracao da `Adjustment Layer` por template fica em [data/generic_item_templates.json](/C:/Users/Paulo/AppData/Roaming/Adobe/CEP/extensions/EffectPalette/data/generic_item_templates.json)
 - `projectPath` pode ser relativo a pasta da extensao
-- o `template_project` tambem pode conter favoritos customizados no bin `EffectPalette_Favorites`
+- o `template_project` tambem pode conter favoritos customizados no bin `FX.palette_Favorites`
 
 ## Direcao futura
 

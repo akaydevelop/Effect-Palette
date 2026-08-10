@@ -1,4 +1,4 @@
-﻿/**
+/**
  * host.jsx — ExtendScript
  */
 
@@ -13,6 +13,7 @@ function normalize(str) {
 }
 
 function diagnose() {
+  return diagnoseNestCapabilities();
   try {
     app.enableQE();
     if (typeof qe === "undefined") return "qe não existe";
@@ -23,6 +24,51 @@ function diagnose() {
   } catch(e) {
     return "Erro: " + e.message;
   }
+
+function diagnoseNestCapabilities() {
+  try {
+    app.enableQE();
+    var sequence = app.project.activeSequence;
+    var selection = sequence ? sequence.getSelection() : [];
+    var qeSequence = null;
+    try { qeSequence = qe.project.getActiveSequence(); } catch (eQeSequence) {}
+    return JSON.stringify({
+      selectedClips: selection ? selection.length : 0,
+      commandApis: {
+        appExecuteCommand: typeof app.executeCommand,
+        appFindMenuCommandId: typeof app.findMenuCommandId,
+        qeExecuteCommand: typeof qe.executeCommand,
+        qeProjectExecuteCommand: typeof qe.project.executeCommand,
+        qeSequenceExecuteCommand: qeSequence ? typeof qeSequence.executeCommand : "no_sequence"
+      },
+      appCommandMembers: _reflectMemberNames(app, "command|menu|execute"),
+      qeCommandMembers: _reflectMemberNames(qe, "command|menu|execute"),
+      qeProjectCommandMembers: _reflectMemberNames(qe.project, "command|menu|execute"),
+      qeSequenceNestMembers: _reflectMemberNames(qeSequence, "nest|subsequence|command|execute")
+    });
+  } catch (e) {
+    return "error:" + e.toString();
+  }
+}
+
+function _reflectMemberNames(target, patternText) {
+  var names = [];
+  if (!target) return names;
+  var pattern = new RegExp(patternText, "i");
+  try {
+    var reflection = target.reflect;
+    var groups = [reflection.properties, reflection.methods];
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g];
+      for (var i = 0; group && i < group.length; i++) {
+        var name = "";
+        try { name = String(group[i].name || group[i]); } catch (eName) {}
+        if (name && pattern.test(name)) names.push(name);
+      }
+    }
+  } catch (eReflect) {}
+  return names;
+}
 }
 
 function getPremiereHostInfoSafe() {
@@ -158,6 +204,29 @@ function getEffectsList() {
   }
 }
 
+// ─── Detecção de tipo de mídia de um TrackItem ────────────────────────────────
+// parentTrackIndex is undocumented and is a LOCAL index within its own track
+// type (video clips count within videoTracks, audio clips count within
+// audioTracks starting again at 0) — it is NOT a combined/global index across
+// both. Treating it as globally offset by numVideoTracks misclassifies audio
+// clips as video whenever their local audio-track index is < numVideoTracks
+// (e.g. a clip on A1 with parentTrackIndex 0 gets read as "video track 0").
+// TrackItem.mediaType ("Video"/"Audio") and .type (1/2) are documented and
+// reliable — use those instead, with the old heuristic only as a last resort.
+function _trackItemIsAudio(clip, parentTrackIndex, numVideoTracks) {
+  var mediaTypeStr = "";
+  try { mediaTypeStr = String(clip.mediaType || ""); } catch (eMT) {}
+  if (mediaTypeStr === "Audio") return true;
+  if (mediaTypeStr === "Video") return false;
+
+  var typeNum = NaN;
+  try { typeNum = Number(clip.type); } catch (eType) {}
+  if (typeNum === 2) return true;
+  if (typeNum === 1) return false;
+
+  return parentTrackIndex >= numVideoTracks;
+}
+
 // ─── 2. Capturar seleção atual ────────────────────────────────────────────────
 
 function getSelectionJSON() {
@@ -175,13 +244,8 @@ function getSelectionJSON() {
       var clip = selection[s];
 
       var trackIndex = clip.parentTrackIndex;
-      var isAudio    = false;
-
       var numVideoTracks = sequence.videoTracks.numTracks;
-      if (trackIndex >= numVideoTracks) {
-        isAudio    = true;
-        trackIndex = trackIndex - numVideoTracks;
-      }
+      var isAudio = _trackItemIsAudio(clip, trackIndex, numVideoTracks);
 
       if (trackIndex < 0) continue;
 
@@ -213,6 +277,647 @@ function getSelectionJSON() {
     return JSON.stringify(result);
   } catch(e) {
     return "[]";
+  }
+}
+
+// Restore the timeline selection if opening the external palette caused
+// Premiere to temporarily report no live selection. The saved selection is
+// matched conservatively by media kind, track, start time and clip name.
+function _restoreTimelineSelection(selectionJSON, sequence) {
+  var saved = [];
+  try { saved = JSON.parse(selectionJSON || "[]"); } catch (eParse) { saved = []; }
+  if (!saved || saved.length === 0) return 0;
+
+  var restored = 0;
+  for (var s = 0; s < saved.length; s++) {
+    var item = saved[s];
+    var tracks = item.isAudio ? sequence.audioTracks : sequence.videoTracks;
+    var trackIndex = Number(item.trackIndex);
+    if (!tracks || isNaN(trackIndex) || trackIndex < 0 || trackIndex >= tracks.numTracks) continue;
+
+    var track = tracks[trackIndex];
+    if (!track || !track.clips) continue;
+    for (var c = 0; c < track.clips.numItems; c++) {
+      var clip = track.clips[c];
+      var sameStart = false;
+      var sameName = false;
+      try { sameStart = String(clip.start.ticks) === String(item.startTicks); } catch (eStart) {}
+      try { sameName = String(clip.name) === String(item.clipName); } catch (eName) {}
+      if (!sameStart || !sameName) continue;
+      try {
+        clip.setSelected(1, 1);
+        restored++;
+      } catch (eSelect) {}
+      break;
+    }
+  }
+  return restored;
+}
+
+// Runs Premiere's internal native Nest command. The stable command key is
+// present in Premiere's own keyboard-shortcut map (cmd.clip.nestify). Menu
+// label lookup remains as a compatibility fallback for older ExtendScript
+// hosts where executeCommand only accepts a numeric menu command id.
+function nestSelectedClips(selectionJSON) {
+  try {
+    var sequence = app.project.activeSequence;
+    if (!sequence) return "no_sequence";
+
+    var selection = null;
+    try { selection = sequence.getSelection(); } catch (eSelection) { selection = null; }
+    if (!selection || selection.length === 0) {
+      _restoreTimelineSelection(selectionJSON, sequence);
+      try { selection = sequence.getSelection(); } catch (eRestoredSelection) { selection = null; }
+    }
+    if (!selection || selection.length === 0) return "no_selection";
+
+    // Newer Premiere builds accept this locale-independent command key. It
+    // opens the same naming dialog as Clip > Nest.
+    try {
+      if (app.executeCommand) {
+        var commandResult = app.executeCommand("cmd.clip.nestify");
+        if (commandResult !== false) return "ok";
+      }
+    } catch (eCommandKey) {}
+
+    // Compatibility path for hosts exposing menu command lookup.
+    try {
+      if (app.findMenuCommandId && app.executeCommand) {
+        var labels = ["Nest...", "Nest", "Aninhar...", "Aninhar"];
+        for (var i = 0; i < labels.length; i++) {
+          var commandId = app.findMenuCommandId(labels[i]);
+          if (commandId && commandId > 0) {
+            app.executeCommand(commandId);
+            return "ok";
+          }
+        }
+      }
+    } catch (eMenuCommand) {}
+
+    return "command_unavailable";
+  } catch (e) {
+    return "error:" + e.toString();
+  }
+}
+
+var _PREMIERE_TICKS_PER_SECOND = 254016000000;
+
+function _removeTrackItemWithoutRipple(trackItem) {
+  if (!trackItem) return false;
+  try {
+    trackItem.remove(false, true);
+    return true;
+  } catch (e0) {}
+  try {
+    trackItem.remove(false, false);
+    return true;
+  } catch (e1) {}
+  return false;
+}
+
+function _selectedClipSpec(clip, isAudio, rangeStartTicks) {
+  var startTicks = 0;
+  var endTicks = 0;
+  var projectNodeId = "";
+  var clipName = "";
+  try { startTicks = Number(clip.start.ticks) || 0; } catch (e0) {}
+  try { endTicks = Number(clip.end.ticks) || startTicks; } catch (e1) {}
+  try { projectNodeId = String(clip.projectItem ? (clip.projectItem.nodeId || "") : ""); } catch (e2) {}
+  try { clipName = String(clip.name || ""); } catch (e3) {}
+  return {
+    clip: clip,
+    isAudio: !!isAudio,
+    startTicks: startTicks,
+    endTicks: endTicks,
+    relativeStartTicks: startTicks - rangeStartTicks,
+    durationTicks: endTicks - startTicks,
+    projectNodeId: projectNodeId,
+    clipName: clipName,
+    used: false
+  };
+}
+
+function _subsequenceClipMatchesSpec(clip, isAudio, spec) {
+  if (!clip || !spec || !!isAudio !== !!spec.isAudio) return false;
+  var startTicks = 0;
+  var endTicks = 0;
+  var projectNodeId = "";
+  var clipName = "";
+  try { startTicks = Number(clip.start.ticks) || 0; } catch (e0) {}
+  try { endTicks = Number(clip.end.ticks) || startTicks; } catch (e1) {}
+  try { projectNodeId = String(clip.projectItem ? (clip.projectItem.nodeId || "") : ""); } catch (e2) {}
+  try { clipName = String(clip.name || ""); } catch (e3) {}
+
+  if (spec.projectNodeId && projectNodeId && spec.projectNodeId !== projectNodeId) return false;
+  if (!spec.projectNodeId && spec.clipName !== clipName) return false;
+  if (Math.abs(startTicks - spec.relativeStartTicks) > 200000) return false;
+  if (Math.abs((endTicks - startTicks) - spec.durationTicks) > 200000) return false;
+  return true;
+}
+
+function _pruneSubsequenceToSelection(subsequence, specs) {
+  if (!subsequence) return 0;
+  var removed = 0;
+  var specBuckets = {};
+
+  function specKey(isAudio, projectNodeId, clipName) {
+    var prefix = isAudio ? "a|" : "v|";
+    if (projectNodeId) return prefix + "node|" + projectNodeId;
+    return prefix + "name|" + clipName;
+  }
+
+  for (var bi = 0; bi < specs.length; bi++) {
+    var bucketKey = specKey(specs[bi].isAudio, specs[bi].projectNodeId, specs[bi].clipName);
+    if (!specBuckets[bucketKey]) specBuckets[bucketKey] = [];
+    specBuckets[bucketKey].push(specs[bi]);
+  }
+  var mediaGroups = [
+    { tracks: subsequence.videoTracks, isAudio: false },
+    { tracks: subsequence.audioTracks, isAudio: true }
+  ];
+
+  for (var g = 0; g < mediaGroups.length; g++) {
+    var group = mediaGroups[g];
+    if (!group.tracks) continue;
+    for (var ti = 0; ti < group.tracks.numTracks; ti++) {
+      var track = group.tracks[ti];
+      if (!track || !track.clips) continue;
+      for (var ci = track.clips.numItems - 1; ci >= 0; ci--) {
+        var clip = track.clips[ci];
+        var matched = false;
+        var clipNodeId = "";
+        var clipName = "";
+        try { clipNodeId = String(clip.projectItem ? (clip.projectItem.nodeId || "") : ""); } catch (eNode) {}
+        try { clipName = String(clip.name || ""); } catch (eClipName) {}
+        var candidates = specBuckets[specKey(group.isAudio, clipNodeId, clipName)] || [];
+        var searchSpecs = candidates.length > 0 ? candidates : specs;
+        for (var si = 0; si < searchSpecs.length; si++) {
+          if (searchSpecs[si].used) continue;
+          if (_subsequenceClipMatchesSpec(clip, group.isAudio, searchSpecs[si])) {
+            searchSpecs[si].used = true;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched && _removeTrackItemWithoutRipple(clip)) removed++;
+      }
+    }
+  }
+  return removed;
+}
+
+function _snapshotAndTargetSelectedTracks(sequence, selection, numVideoTracks) {
+  var snapshot = { video: [], audio: [] };
+  var selectedVideo = {};
+  var selectedAudio = {};
+
+  for (var i = 0; i < selection.length; i++) {
+    var clip = selection[i];
+    var isAudio = _trackItemIsAudio(clip, clip.parentTrackIndex, numVideoTracks);
+    var trackIndex = Number(clip.parentTrackIndex);
+    if (isNaN(trackIndex) || trackIndex < 0) continue;
+    if (isAudio) selectedAudio[trackIndex] = true;
+    else selectedVideo[trackIndex] = true;
+  }
+
+  function targetTracks(tracks, selected, targetSnapshot) {
+    if (!tracks) return;
+    for (var ti = 0; ti < tracks.numTracks; ti++) {
+      var track = tracks[ti];
+      var wasTargeted = false;
+      try { wasTargeted = !!track.isTargeted(); } catch (e0) {}
+      targetSnapshot.push(wasTargeted);
+      var shouldBeTargeted = !!selected[ti];
+      if (wasTargeted !== shouldBeTargeted) {
+        try { track.setTargeted(shouldBeTargeted, true); } catch (e1) {}
+      }
+    }
+  }
+
+  targetTracks(sequence.videoTracks, selectedVideo, snapshot.video);
+  targetTracks(sequence.audioTracks, selectedAudio, snapshot.audio);
+  return snapshot;
+}
+
+function _restoreTargetedTracks(sequence, snapshot) {
+  if (!sequence || !snapshot) return;
+  function restore(tracks, states) {
+    if (!tracks || !states) return;
+    for (var ti = 0; ti < tracks.numTracks && ti < states.length; ti++) {
+      var isTargeted = false;
+      try { isTargeted = !!tracks[ti].isTargeted(); } catch (e0) {}
+      if (isTargeted !== !!states[ti]) {
+        try { tracks[ti].setTargeted(!!states[ti], true); } catch (e1) {}
+      }
+    }
+  }
+  restore(sequence.videoTracks, snapshot.video);
+  restore(sequence.audioTracks, snapshot.audio);
+}
+
+function _targetNestDestination(sequence, videoTrackIndex, audioTrackIndex) {
+  function targetOnly(tracks, targetIndex) {
+    if (!tracks) return;
+    for (var ti = 0; ti < tracks.numTracks; ti++) {
+      var track = tracks[ti];
+      var wasTargeted = false;
+      try { wasTargeted = !!track.isTargeted(); } catch (e0) {}
+      var shouldBeTargeted = targetIndex !== null && ti === targetIndex;
+      if (wasTargeted !== shouldBeTargeted) {
+        try { track.setTargeted(shouldBeTargeted, true); } catch (e1) {}
+      }
+    }
+  }
+
+  targetOnly(sequence.videoTracks, videoTrackIndex);
+  targetOnly(sequence.audioTracks, audioTrackIndex);
+}
+
+function _overwriteNestedProjectItemOnTrack(track, projectItem, startTicks) {
+  var outcome = { attempted: false, returned: null, error: "" };
+  if (!track || !projectItem || typeof track.overwriteClip !== "function") return outcome;
+  try {
+    outcome.returned = track.overwriteClip(projectItem, String(startTicks));
+    outcome.attempted = true;
+    return outcome;
+  } catch (eTicks) {
+    outcome.error = String(eTicks);
+  }
+  try {
+    outcome.returned = track.overwriteClip(projectItem, _timeFromTicks(startTicks));
+    outcome.attempted = true;
+  } catch (eTime) {
+    outcome.error += (outcome.error ? " | " : "") + String(eTime);
+  }
+  return outcome;
+}
+
+function _findNestedTrackItemsAtStart(sequence, projectItem, startTicks, preferredVideoTrack, preferredAudioTrack) {
+  var found = { video: null, audio: null, videoTrack: null, audioTrack: null, videoCount: 0, audioCount: 0 };
+  var scannedVideo = {};
+  var scannedAudio = {};
+
+  function scanTrack(tracks, trackIndex, isAudio) {
+    if (!tracks || trackIndex === null || trackIndex < 0 || trackIndex >= tracks.numTracks) return;
+    var scanned = isAudio ? scannedAudio : scannedVideo;
+    if (scanned[trackIndex]) return;
+    scanned[trackIndex] = true;
+    var clip = _findClipByProjectItemAtStart(tracks[trackIndex], projectItem, startTicks);
+    if (!clip) return;
+    if (isAudio) {
+      found.audioCount++;
+      if (!found.audio) { found.audio = clip; found.audioTrack = trackIndex; }
+    } else {
+      found.videoCount++;
+      if (!found.video) { found.video = clip; found.videoTrack = trackIndex; }
+    }
+  }
+
+  function scanUntilFound(tracks, isAudio) {
+    if (!tracks) return;
+    for (var ti = 0; ti < tracks.numTracks; ti++) {
+      scanTrack(tracks, ti, isAudio);
+      if (isAudio ? !!found.audio : !!found.video) return;
+    }
+  }
+
+  scanTrack(sequence.videoTracks, preferredVideoTrack, false);
+  scanTrack(sequence.audioTracks, preferredAudioTrack, true);
+  if (!found.video && preferredVideoTrack !== null) scanUntilFound(sequence.videoTracks, false);
+  if (!found.audio && preferredAudioTrack !== null) scanUntilFound(sequence.audioTracks, true);
+  return found;
+}
+
+function _selectionContainsClip(selection, targetClip) {
+  for (var i = 0; i < selection.length; i++) {
+    if (selection[i] === targetClip) return true;
+    try {
+      if (String(selection[i].nodeId || "") && String(selection[i].nodeId) === String(targetClip.nodeId || "")) {
+        return true;
+      }
+    } catch (e) {}
+  }
+  return false;
+}
+
+function _trackHasUnselectedOverlap(track, selection, startTicks, endTicks) {
+  if (!track || !track.clips) return false;
+  for (var ci = 0; ci < track.clips.numItems; ci++) {
+    var clip = track.clips[ci];
+    if (!clip || _selectionContainsClip(selection, clip)) continue;
+    var clipStart = 0;
+    var clipEnd = 0;
+    try { clipStart = Number(clip.start.ticks) || 0; } catch (e0) {}
+    try { clipEnd = Number(clip.end.ticks) || clipStart; } catch (e1) {}
+    if (clipStart < endTicks && clipEnd > startTicks) return true;
+  }
+  return false;
+}
+
+function _directChildBinByName(parentItem, targetName) {
+  if (!parentItem || !targetName || !parentItem.children) return null;
+  try {
+    for (var i = 0; i < parentItem.children.numItems; i++) {
+      var child = parentItem.children[i];
+      var childName = "";
+      var childType = "";
+      try { childName = String(child.name || ""); } catch (eName) {}
+      try { childType = String(child.type || ""); } catch (eType) {}
+      if (childName === targetName && (childType === "2" || childType === "BIN")) return child;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function _ensureProjectBinPath(binPath) {
+  if (!app.project || !app.project.rootItem) return null;
+  var normalized = String(binPath || "Nested Sequences").replace(/\\/g, "/");
+  var parts = normalized.split("/");
+  var parent = app.project.rootItem;
+
+  for (var i = 0; i < parts.length; i++) {
+    var part = String(parts[i] || "").replace(/^\s+|\s+$/g, "");
+    if (!part || part === ".") continue;
+    var nextBin = _directChildBinByName(parent, part);
+    if (!nextBin) {
+      try { nextBin = parent.createBin(part); } catch (eCreate) { nextBin = null; }
+    }
+    if (!nextBin) return parent;
+    parent = nextBin;
+  }
+  return parent;
+}
+
+function _ensureNestedSequencesBin() {
+  if (!app.project || !app.project.rootItem) return null;
+  var rootItem = app.project.rootItem;
+  var existing = _directChildBinByName(rootItem, "Nested Sequences");
+  var assetsBin =
+    _directChildBinByName(rootItem, "FX.palette_Assets") ||
+    _directChildBinByName(rootItem, "EffectPalette_Assets");
+  try {
+    if (assetsBin && String(assetsBin.name || "") === "EffectPalette_Assets") {
+      assetsBin.name = "FX.palette_Assets";
+    }
+  } catch (eLegacyAssetsName) {}
+  if (existing) return existing;
+
+  var legacyNested = assetsBin ? _directChildBinByName(assetsBin, "Nested Sequences") : null;
+  if (legacyNested && _moveProjectItemToBin(legacyNested, rootItem)) {
+    return legacyNested;
+  }
+
+  try {
+    return rootItem.createBin("Nested Sequences");
+  } catch (eCreate) {
+    return null;
+  }
+}
+
+
+function _nextNestCodeName() {
+  var highest = 0;
+  var total = 0;
+  try { total = app.project.sequences.numSequences || 0; } catch (eTotal) {}
+  for (var i = 0; i < total; i++) {
+    var name = "";
+    try { name = String(app.project.sequences[i].name || ""); } catch (eName) {}
+    var match = /^FXN-(\d+)$/i.exec(name);
+    if (match) highest = Math.max(highest, Number(match[1]) || 0);
+  }
+  var nextNumber = highest + 1;
+  var digits = String(nextNumber);
+  while (digits.length < 3) digits = "0" + digits;
+  return "FXN-" + digits;
+}
+
+function _uniqueNestSequenceName(baseName, targetSequence) {
+  var cleanBase = String(baseName || "").replace(/^\s+|\s+$/g, "") || _nextNestCodeName();
+  var used = {};
+  var total = 0;
+  try { total = app.project.sequences.numSequences || 0; } catch (eTotal) {}
+  for (var i = 0; i < total; i++) {
+    var sequence = null;
+    try { sequence = app.project.sequences[i]; } catch (eSequence) {}
+    if (!sequence || sequence === targetSequence) continue;
+    try { used[String(sequence.name || "").toLowerCase()] = true; } catch (eName) {}
+  }
+  if (!used[cleanBase.toLowerCase()]) return cleanBase;
+
+  var suffix = 2;
+  var candidate = cleanBase + " 02";
+  while (used[candidate.toLowerCase()]) {
+    suffix++;
+    var suffixText = String(suffix);
+    if (suffixText.length < 2) suffixText = "0" + suffixText;
+    candidate = cleanBase + " " + suffixText;
+  }
+  return candidate;
+}
+
+function _organizeNestSequenceObject(sequence, requestedName, binPath) {
+  if (!sequence || !sequence.projectItem) return null;
+  var finalName = _uniqueNestSequenceName(requestedName, sequence);
+  var finalBinPath = String(binPath || "Nested Sequences").replace(/^\s+|\s+$/g, "") || "Nested Sequences";
+  try { sequence.name = finalName; } catch (eSequenceName) {}
+  try { sequence.projectItem.name = finalName; } catch (eProjectItemName) {}
+  var targetBin = finalBinPath === "Nested Sequences"
+    ? _ensureNestedSequencesBin()
+    : _ensureProjectBinPath(finalBinPath);
+  if (targetBin) _moveProjectItemToBin(sequence.projectItem, targetBin);
+  return { name: finalName, binPath: finalBinPath };
+}
+
+function organizeNestSequence(sequenceID, requestedName, binPath) {
+  try {
+    var targetId = String(sequenceID || "");
+    var total = app.project && app.project.sequences ? app.project.sequences.numSequences : 0;
+    for (var i = 0; i < total; i++) {
+      var sequence = app.project.sequences[i];
+      var currentId = "";
+      try { currentId = String(sequence.sequenceID || ""); } catch (eId) {}
+      if (currentId !== targetId) continue;
+      var organized = _organizeNestSequenceObject(sequence, requestedName, binPath);
+      if (!organized) return "not_found";
+      return "ok:name=" + organized.name + ",bin=" + organized.binPath;
+    }
+    return "not_found";
+  } catch (e) {
+    return "error:" + String(e);
+  }
+}
+
+// Experimental API-first Nest. Unlike cmd.clip.nestify, this creates a
+// subsequence from the selected range and inserts the resulting Sequence
+// ProjectItem once, targeting a single video and a single audio track.
+function nestSelectedClipsViaAPI(selectionJSON, requestedName, binPath) {
+  var sequence = null;
+  var originalInPoint = null;
+  var originalOutPoint = null;
+  var targetingSnapshot = null;
+  var subsequence = null;
+  var startedAt = new Date().getTime();
+  var createMs = 0;
+  var pruneMs = 0;
+  var insertMs = 0;
+
+  try {
+    sequence = app.project.activeSequence;
+    if (!sequence) return "no_sequence";
+
+    var selection = null;
+    try { selection = sequence.getSelection(); } catch (eSelection) { selection = null; }
+    if (!selection || selection.length === 0) {
+      _restoreTimelineSelection(selectionJSON, sequence);
+      try { selection = sequence.getSelection(); } catch (eRestoredSelection) { selection = null; }
+    }
+    if (!selection || selection.length === 0) return "no_selection";
+
+    var numVideoTracks = sequence.videoTracks ? sequence.videoTracks.numTracks : 0;
+    var rangeStartTicks = null;
+    var rangeEndTicks = null;
+    var destinationVideoTrack = null;
+    var destinationAudioTrack = null;
+
+    for (var i = 0; i < selection.length; i++) {
+      var selectedClip = selection[i];
+      var startTicks = Number(selectedClip.start.ticks) || 0;
+      var endTicks = Number(selectedClip.end.ticks) || startTicks;
+      var selectedTrackIndex = Number(selectedClip.parentTrackIndex);
+      var isAudio = _trackItemIsAudio(selectedClip, selectedTrackIndex, numVideoTracks);
+      if (rangeStartTicks === null || startTicks < rangeStartTicks) rangeStartTicks = startTicks;
+      if (rangeEndTicks === null || endTicks > rangeEndTicks) rangeEndTicks = endTicks;
+      if (isAudio) {
+        if (destinationAudioTrack === null || selectedTrackIndex < destinationAudioTrack) {
+          destinationAudioTrack = selectedTrackIndex;
+        }
+      } else if (destinationVideoTrack === null || selectedTrackIndex < destinationVideoTrack) {
+        destinationVideoTrack = selectedTrackIndex;
+      }
+    }
+
+    if (rangeStartTicks === null || rangeEndTicks === null || rangeEndTicks <= rangeStartTicks) {
+      return "no_selection";
+    }
+
+    var selectedSpecs = [];
+    for (var si = 0; si < selection.length; si++) {
+      var specClip = selection[si];
+      var specIsAudio = _trackItemIsAudio(specClip, specClip.parentTrackIndex, numVideoTracks);
+      selectedSpecs.push(_selectedClipSpec(specClip, specIsAudio, rangeStartTicks));
+    }
+
+    if (destinationVideoTrack !== null &&
+        _trackHasUnselectedOverlap(sequence.videoTracks[destinationVideoTrack], selection, rangeStartTicks, rangeEndTicks)) {
+      return "unsafe_overlap";
+    }
+    if (destinationAudioTrack !== null &&
+        _trackHasUnselectedOverlap(sequence.audioTracks[destinationAudioTrack], selection, rangeStartTicks, rangeEndTicks)) {
+      return "unsafe_overlap";
+    }
+
+    try { originalInPoint = sequence.getInPoint(); } catch (eGetIn) {}
+    try { originalOutPoint = sequence.getOutPoint(); } catch (eGetOut) {}
+    targetingSnapshot = _snapshotAndTargetSelectedTracks(sequence, selection, numVideoTracks);
+
+    var createStartedAt = new Date().getTime();
+    try {
+      sequence.setInPoint(rangeStartTicks / _PREMIERE_TICKS_PER_SECOND);
+      sequence.setOutPoint(rangeEndTicks / _PREMIERE_TICKS_PER_SECOND);
+      subsequence = sequence.createSubsequence(false);
+    } catch (eCreate) {
+      _restoreTargetedTracks(sequence, targetingSnapshot);
+      return String(eCreate).indexOf("createSubsequence") >= 0 ? "api_unavailable" : "error:" + String(eCreate);
+    } finally {
+      try { if (originalInPoint !== null) sequence.setInPoint(Number(originalInPoint)); } catch (eRestoreIn) {}
+      try { if (originalOutPoint !== null) sequence.setOutPoint(Number(originalOutPoint)); } catch (eRestoreOut) {}
+    }
+    createMs = new Date().getTime() - createStartedAt;
+
+    if (!subsequence || !subsequence.projectItem) {
+      _restoreTargetedTracks(sequence, targetingSnapshot);
+      return "api_unavailable";
+    }
+    var organizedNest = _organizeNestSequenceObject(subsequence, requestedName, binPath);
+
+    var pruneStartedAt = new Date().getTime();
+    var prunedCount = _pruneSubsequenceToSelection(subsequence, selectedSpecs);
+    pruneMs = new Date().getTime() - pruneStartedAt;
+    var insertedVideo = null;
+    var insertedAudio = null;
+    var insertionAttempt = null;
+    var insertStartedAt = new Date().getTime();
+    _targetNestDestination(sequence, destinationVideoTrack, destinationAudioTrack);
+
+    try {
+      // One track-level overwrite of an A/V Sequence ProjectItem inserts its
+      // linked video/audio pair. A second overwrite on the audio track creates
+      // a duplicate pair because Premiere updates Track.clips asynchronously.
+      if (destinationVideoTrack !== null) {
+        insertionAttempt = _overwriteNestedProjectItemOnTrack(
+          sequence.videoTracks[destinationVideoTrack],
+          subsequence.projectItem,
+          rangeStartTicks
+        );
+      } else if (destinationAudioTrack !== null) {
+        insertionAttempt = _overwriteNestedProjectItemOnTrack(
+          sequence.audioTracks[destinationAudioTrack],
+          subsequence.projectItem,
+          rangeStartTicks
+        );
+      }
+    } finally {
+      _restoreTargetedTracks(sequence, targetingSnapshot);
+    }
+
+    var insertedItems = _findNestedTrackItemsAtStart(
+      sequence,
+      subsequence.projectItem,
+      rangeStartTicks,
+      destinationVideoTrack,
+      destinationAudioTrack
+    );
+    insertedVideo = insertedItems.video;
+    insertedAudio = insertedItems.audio;
+    insertMs = new Date().getTime() - insertStartedAt;
+
+    var videoInsertedAsRequired = destinationVideoTrack === null || !!insertedVideo;
+    var audioInsertedAsRequired = destinationAudioTrack === null || !!insertedAudio;
+    if (!videoInsertedAsRequired || !audioInsertedAsRequired) {
+      // Keep the created subsequence for inspection/recovery. Deleting it here
+      // made Premiere's failed A/V insertion almost impossible to diagnose.
+      return "insert_failed:video=" + (insertedVideo ? "1" : "0") +
+        ",audio=" + (insertedAudio ? "1" : "0") +
+        ",attempted=" + (insertionAttempt && insertionAttempt.attempted ? "1" : "0") +
+        ",createMs=" + createMs + ",pruneMs=" + pruneMs + ",insertMs=" + insertMs +
+        ",sequence=" + String(subsequence.name || "FXN");
+    }
+
+    var removedCount = 0;
+    for (var ri = 0; ri < selection.length; ri++) {
+      var originalClip = selection[ri];
+      if (originalClip === insertedVideo || originalClip === insertedAudio) continue;
+      if (_removeTrackItemWithoutRipple(originalClip)) removedCount++;
+    }
+
+    try { if (insertedVideo) insertedVideo.setSelected(1, 0); } catch (eSelectVideo) {}
+    try { if (insertedAudio) insertedAudio.setSelected(1, 1); } catch (eSelectAudio) {}
+
+    return "ok:removed=" + removedCount + ",pruned=" + prunedCount +
+      ",videoTrack=" + insertedItems.videoTrack + ",audioTrack=" + insertedItems.audioTrack +
+      ",videoFound=" + (insertedVideo ? "1" : "0") + ",audioFound=" + (insertedAudio ? "1" : "0") +
+      ",name=" + (organizedNest ? organizedNest.name : String(subsequence.name || "FXN")) +
+      ",createMs=" + createMs + ",pruneMs=" + pruneMs + ",insertMs=" + insertMs +
+      ",totalMs=" + (new Date().getTime() - startedAt);
+  } catch (e) {
+    try {
+      if (sequence) {
+        if (originalInPoint !== null) sequence.setInPoint(Number(originalInPoint));
+        if (originalOutPoint !== null) sequence.setOutPoint(Number(originalOutPoint));
+        _restoreTargetedTracks(sequence, targetingSnapshot);
+      }
+    } catch (eRestore) {}
+    return "error:" + e.toString();
   }
 }
 
@@ -623,7 +1328,11 @@ function getTemplateFavoritesListSafe() {
       return JSON.stringify({ rootFound: false, items: [] });
     }
 
-    var rootBin = _findBinByName(app.project.rootItem, "EffectPalette_Favorites");
+    var rootBin = _findBinByName(app.project.rootItem, "FX.palette_Favorites");
+    if (!rootBin) {
+      rootBin = _findBinByName(app.project.rootItem, "EffectPalette_Favorites");
+      try { if (rootBin) rootBin.name = "FX.palette_Favorites"; } catch (eLegacyName) {}
+    }
     if (!rootBin) {
       return JSON.stringify({ rootFound: false, items: [] });
     }
@@ -1391,8 +2100,10 @@ function _cloneComponentParams(sourceComponent, targetComponent) {
   return copied;
 }
 
-function _cloneExtraComponentsToInsertedClip(sourceClip, targetStdClip, targetQeClip, isAudio) {
+function _cloneExtraComponentsToInsertedClip(sourceClip, targetStdClip, targetQeClip, isAudio, cachedFxLists) {
   if (!sourceClip || !sourceClip.components || !targetStdClip || !targetQeClip) return 0;
+
+  var cachedFxList = cachedFxLists ? (isAudio ? cachedFxLists.audio : cachedFxLists.video) : null;
 
   var copied = 0;
   for (var ci = 0; ci < sourceClip.components.numItems; ci++) {
@@ -1411,7 +2122,7 @@ function _cloneExtraComponentsToInsertedClip(sourceClip, targetStdClip, targetQe
       matchName: matchName,
       resolvedEffectName: displayName
     };
-    var effectObj = _resolveEffectObject(displayName, matchName, !!isAudio, effectMeta);
+    var effectObj = _resolveEffectObject(displayName, matchName, !!isAudio, effectMeta, cachedFxList);
     if (!effectObj) continue;
 
     var beforeSnapshots = _snapshotNamedComponents(targetStdClip, displayName, effectMeta);
@@ -1622,37 +2333,49 @@ function _findFirstProjectItemMatching(matcher) {
   return matches.length ? matches[0] : null;
 }
 
-function _ensureEffectPaletteAssetsBin() {
+function _ensureFxPaletteAssetsBin() {
   if (!app.project || !app.project.rootItem) return null;
 
-  var existing = _findFirstProjectItemMatching(function(item) {
-    var name = "";
-    var itemType = "";
-    try { name = String(item.name || ""); } catch (e0) {}
-    try { itemType = String(item.type || ""); } catch (e1) {}
-    return name === "EffectPalette_Assets" && (itemType === "2" || itemType === "BIN");
-  });
+  function findAssetsBin(targetName) {
+    return _findFirstProjectItemMatching(function(item) {
+      var name = "";
+      var itemType = "";
+      try { name = String(item.name || ""); } catch (e0) {}
+      try { itemType = String(item.type || ""); } catch (e1) {}
+      return name === targetName && (itemType === "2" || itemType === "BIN");
+    });
+  }
+
+  var existing = findAssetsBin("FX.palette_Assets");
   if (existing) return existing;
 
+  var legacy = findAssetsBin("EffectPalette_Assets");
+  if (legacy) {
+    try { legacy.name = "FX.palette_Assets"; } catch (eRename) {}
+    return legacy;
+  }
+
   try {
-    return app.project.rootItem.createBin("EffectPalette_Assets");
+    return app.project.rootItem.createBin("FX.palette_Assets");
   } catch (e2) {
     return null;
   }
 }
 
 function _moveProjectItemToBin(projectItem, targetBin) {
-  if (!projectItem || !targetBin || projectItem === targetBin) return;
+  if (!projectItem || !targetBin || projectItem === targetBin) return false;
   try {
     if (typeof projectItem.moveBin === "function") {
       projectItem.moveBin(targetBin);
+      return true;
     }
   } catch (e) {}
+  return false;
 }
 
 function _organizeGenericAsset(projectItem) {
   if (!projectItem) return projectItem;
-  var assetsBin = _ensureEffectPaletteAssetsBin();
+  var assetsBin = _ensureFxPaletteAssetsBin();
   _moveProjectItemToBin(projectItem, assetsBin);
   return projectItem;
 }
@@ -1886,7 +2609,7 @@ function _resolveTemplateProjectPath(rawProjectPath) {
 }
 
 function _importFavoriteProjectItem(itemName, mediaPath, sequenceID, favoriteType, sourceProjectPath) {
-  var assetsBin = _ensureEffectPaletteAssetsBin() || (app.project ? app.project.rootItem : null);
+  var assetsBin = _ensureFxPaletteAssetsBin() || (app.project ? app.project.rootItem : null);
 
   if (favoriteType === "sequence" || sequenceID) {
     var existingSequenceItem = _findSequenceProjectItemByName(itemName);
@@ -1998,7 +2721,7 @@ function _importAdjustmentLayerFromTemplate() {
   var importResult = app.project.importSequences(projectPath, sequenceIDs);
   if (importResult !== 0 && importResult !== true) return "create_failed";
 
-  var assetsBin = _ensureEffectPaletteAssetsBin();
+  var assetsBin = _ensureFxPaletteAssetsBin();
 
   try {
     var totalSequences = app.project.sequences ? (app.project.sequences.numSequences || 0) : 0;
@@ -2695,7 +3418,7 @@ function _legacyEffectAlias(displayName, matchName) {
   return null;
 }
 
-function _resolveEffectObject(displayName, matchName, isAudioFx, effectMeta) {
+function _resolveEffectObject(displayName, matchName, isAudioFx, effectMeta, cachedFxList) {
   var effectObj = null;
   var lookupNames = [];
   var seenLookupNames = {};
@@ -2731,9 +3454,9 @@ function _resolveEffectObject(displayName, matchName, isAudioFx, effectMeta) {
     if (effectObj) return effectObj;
   }
 
-  var fxList = isAudioFx
+  var fxList = cachedFxList || (isAudioFx
     ? qe.project.getAudioEffectList()
-    : qe.project.getVideoEffectList();
+    : qe.project.getVideoEffectList());
   var normalTarget = _normName(displayName);
   var canonicalTarget = _canonicalEffectName(displayName);
 
@@ -3307,37 +4030,6 @@ function _buildKeyframeTimingInfo(stdClip, saved) {
   };
 }
 
-function _presetHasAnimatedParams(filterPresets) {
-  if (!filterPresets || !filterPresets.length) return false;
-  for (var i = 0; i < filterPresets.length; i++) {
-    var params = filterPresets[i] && filterPresets[i].params ? filterPresets[i].params : [];
-    for (var p = 0; p < params.length; p++) {
-      if (params[p] && params[p].keyframes) return true;
-    }
-  }
-  return false;
-}
-
-function _ensureStillImageKeyframeHelper(ctx) {
-  if (!ctx || !ctx.stdClip || !ctx.qeClip) return false;
-
-  var timingInfo = _buildKeyframeTimingInfo(ctx.stdClip, ctx.saved);
-  if ((!timingInfo.isImageLike && !timingInfo.looksLikeInfiniteStill) || timingInfo.isAdjustmentLike) return false;
-
-  var existing = _snapshotNamedComponents(ctx.stdClip, "Levels", null);
-  if (existing && existing.length > 0) return true;
-
-  var helperObj = _resolveEffectObject("Levels", "", false, null);
-  if (!helperObj) return false;
-
-  try {
-    ctx.qeClip.addVideoEffect(helperObj);
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
 function _applyPresetParams(addedEffect, params, stdClip, saved, effectMeta) {
   if (!addedEffect || !params) return;
   var timingInfo = _buildKeyframeTimingInfo(stdClip, saved);
@@ -3442,33 +4134,6 @@ function _cleanupDuplicateAudioComponents(stdClip, displayName, keepComponent) {
   }
 }
 
-function _removeTrackItemIfPossible(trackItem) {
-  if (!trackItem) return false;
-
-  try {
-    if (typeof trackItem.remove === "function") {
-      trackItem.remove(false, true);
-      return true;
-    }
-  } catch (e0) {}
-
-  try {
-    if (typeof trackItem.remove === "function") {
-      trackItem.remove(false);
-      return true;
-    }
-  } catch (e1) {}
-
-  try {
-    if (typeof trackItem.remove === "function") {
-      trackItem.remove();
-      return true;
-    }
-  } catch (e2) {}
-
-  return false;
-}
-
 function _applyFilterPresetsToContext(ctx, targetFilterPresets, kind) {
   var stats = { applied: 0, partial: 0 };
   if (!ctx || !ctx.stdClip || !ctx.qeClip || !targetFilterPresets || !targetFilterPresets.length) {
@@ -3514,74 +4179,6 @@ function _applyFilterPresetsToContext(ctx, targetFilterPresets, kind) {
   }
 
   return stats;
-}
-
-function _createPresetHelperContext(sequence, qeSequence, targetCtx) {
-  if (!sequence || !qeSequence || !targetCtx || !targetCtx.stdClip) return null;
-
-  var helperItem = _createGenericProjectItem("black_video", sequence);
-  if (!helperItem || typeof helperItem === "string") return null;
-
-  var timing = _buildKeyframeTimingInfo(targetCtx.stdClip, targetCtx.saved);
-  var startTicks = Number((targetCtx.saved && targetCtx.saved.startTicks) || timing.startTicks) || 0;
-  var endTicks = Number((targetCtx.saved && targetCtx.saved.endTicks) || timing.endTicks) || 0;
-  if (endTicks <= startTicks) return null;
-
-  var helperTrackIndex = sequence.videoTracks ? sequence.videoTracks.numTracks : 0;
-  if (!_ensureVideoTrackIndex(sequence, helperTrackIndex)) return null;
-
-  var helperTrack = null;
-  var qeHelperTrack = null;
-  try { helperTrack = sequence.videoTracks[helperTrackIndex]; } catch (eTrack) {}
-  try { qeHelperTrack = qeSequence.getVideoTrackAt(helperTrackIndex); } catch (eQeTrack) {}
-  if (!helperTrack) return null;
-
-  var inserted = false;
-  try {
-    helperTrack.overwriteClip(helperItem, String(startTicks));
-    inserted = true;
-  } catch (e0) {
-    try {
-      helperTrack.overwriteClip(helperItem, _timeFromTicks(startTicks));
-      inserted = true;
-    } catch (e1) {
-      if (typeof helperTrack.insertClip === "function") {
-        try {
-          helperTrack.insertClip(helperItem, _timeFromTicks(startTicks));
-          inserted = true;
-        } catch (e2) {}
-      }
-    }
-  }
-  if (!inserted) return null;
-
-  var helperStdClip = _findClipByProjectItemAtStart(helperTrack, helperItem, startTicks) ||
-    _findClipByStartOnTrack(helperTrack, startTicks, String(helperItem.name || ""));
-  var helperQeClip = null;
-  try { helperQeClip = _findQeClipOnTrack(qeHelperTrack, startTicks); } catch (eQeClip) {}
-  if (!helperStdClip || !helperQeClip) return null;
-
-  try {
-    helperStdClip.end = _timeFromTicks(endTicks);
-  } catch (eTrim) {}
-
-  return {
-    qeClip: helperQeClip,
-    stdClip: helperStdClip,
-    trackIndex: helperTrackIndex,
-    saved: {
-      startTicks: String(startTicks),
-      endTicks: String(endTicks),
-      inPointTicks: helperStdClip.inPoint && helperStdClip.inPoint.ticks !== undefined ? helperStdClip.inPoint.ticks : "",
-      outPointTicks: helperStdClip.outPoint && helperStdClip.outPoint.ticks !== undefined ? helperStdClip.outPoint.ticks : "",
-      clipName: String(helperStdClip.name || ""),
-      trackIndex: helperTrackIndex,
-      isAudio: false,
-      isImageLike: false,
-      isAdjustmentLike: false,
-      looksLikeInfiniteStill: false
-    }
-  };
 }
 
 function applyPresetWithSelection(filterPresetsJSON, selectionJSON) {
@@ -3633,36 +4230,15 @@ function applyPresetWithSelection(filterPresetsJSON, selectionJSON) {
         var ctx = uniqueTargets[kind][key];
 
         var targetFilterPresets = _filterPresetsForTarget(filterPresets, kind === "audio");
-        var isAnimatedVideoPreset = kind === "video" && _presetHasAnimatedParams(targetFilterPresets);
-        var timingInfo = _buildKeyframeTimingInfo(ctx.stdClip, ctx.saved);
-        var usedHelper = false;
 
-        if (isAnimatedVideoPreset && timingInfo && timingInfo.looksLikeInfiniteStill) {
-          var helperCtx = _createPresetHelperContext(sequence, qeSequence, ctx);
-          if (helperCtx) {
-            var helperStats = _applyFilterPresetsToContext(helperCtx, targetFilterPresets, kind);
-            applied += helperStats.applied;
-            partial += helperStats.partial;
-
-            try {
-              _cloneExtraComponentsToInsertedClip(helperCtx.stdClip, ctx.stdClip, ctx.qeClip, false);
-              usedHelper = true;
-            } catch (eClone) {
-              partial++;
-            }
-
-            _removeTrackItemIfPossible(helperCtx.stdClip);
-          }
-        }
-
-        if (!usedHelper) {
-          if (isAnimatedVideoPreset) {
-            _ensureStillImageKeyframeHelper(ctx);
-          }
-          var directStats = _applyFilterPresetsToContext(ctx, targetFilterPresets, kind);
-          applied += directStats.applied;
-          partial += directStats.partial;
-        }
+        // Keyframes are applied directly on the target clip for every clip
+        // type, including "infinite duration" synthetic clips (Adjustment
+        // Layer, stills, color matte) — _keyframeTimeFromTicks anchors on the
+        // clip's own inPoint uniformly, so no helper effect/clone workaround
+        // is needed to route around bad timing on those clips anymore.
+        var directStats = _applyFilterPresetsToContext(ctx, targetFilterPresets, kind);
+        applied += directStats.applied;
+        partial += directStats.partial;
       }
     }
 
@@ -3767,16 +4343,13 @@ function _findClipProperties(component, propertyName, propertyIndex) {
 
 function _keyframeTimeFromTicks(ticks, originTicks, baseTicks) {
   var kfTime = new Time();
+  // Effect-property time is always clip-local, anchored at the clip's own
+  // inPoint — this holds uniformly for normal clips AND "infinite duration"
+  // synthetic clips (Adjustment Layer, stills, color matte), since Premiere
+  // tracks a valid inPoint for those too. No clip-type detection needed.
   var offsetTicks = 0;
   if (baseTicks && typeof baseTicks === "object") {
-    if (baseTicks.looksLikeInfiniteStill) {
-      // Synthetic clips such as stills and adjustment layers appear to key
-      // against their sequence position instead of the same clip-local timing
-      // path used by normal video clips.
-      offsetTicks = baseTicks.startTicks || 0;
-    } else {
-      offsetTicks = baseTicks.inPointTicks || 0;
-    }
+    offsetTicks = baseTicks.inPointTicks || 0;
   } else {
     offsetTicks = Number(baseTicks) || 0;
   }
@@ -3791,23 +4364,18 @@ function _keyframeTimeFromTicks(ticks, originTicks, baseTicks) {
 function _applyTemporalInterpolation(prop, time, parts) {
   if (!prop || !parts || parts.length < 3) return;
 
-  var interpOut = 5;
-  var interpIn = 5;
-
-  if (parts.length >= 10) {
-    interpOut = parseInt(parts[8], 10);
-    interpIn = parseInt(parts[9], 10);
-  } else if (parts.length >= 8) {
-    interpOut = parseInt(parts[2], 10);
-    interpIn = parseInt(parts[2], 10);
-  }
-
-  if (isNaN(interpOut)) interpOut = 5;
-  if (isNaN(interpIn)) interpIn = interpOut;
-  var interp = 5;
-
-  if (interpOut === 4 && interpIn === 4) interp = 4;
-  else if (interpOut === 6 || interpIn === 6 || interpOut === 7 || interpIn === 7 || interpOut === 8 || interpIn === 8) interp = 6;
+  // Field index 2 is Premiere's own native interpolation-type code for this
+  // keyframe (confirmed against real .prfpset data — values 0/2/4/5 seen,
+  // present at the same index for both scalar entries (8 fields) and 2D
+  // entries like Position (14 fields)). Pass it straight through: Premiere
+  // wrote this code into the preset, so it's already in the exact format
+  // setInterpolationTypeAtKey expects. The previous logic read parts[8]/[9]
+  // for longer entries, which are unrelated constant fields (always "5","4"
+  // regardless of the keyframe's real type), and then collapsed everything
+  // that wasn't a narrow special case down to a hardcoded default — so a
+  // Linear keyframe (code 0) could never survive and always ended up eased.
+  var interp = parseInt(parts[2], 10);
+  if (isNaN(interp)) interp = 5;
 
   try {
     if (typeof prop.setInterpolationTypeAtKey === "function") {
@@ -4295,15 +4863,19 @@ function _applyKeyframes(prop, keyframesStr, param, timingInfo) {
           baseTicks: timingInfo || 0
         });
 
+      var addedTime = null;
       try {
-        prop.addKey(kfTime);
+        addedTime = prop.addKey(kfTime);
       } catch (eAdd) {
         continue;
       }
+      // Premiere may snap the key to a different frame than requested; write
+      // the value at the time it actually landed on, not the original guess.
+      var useTime = (addedTime && typeof addedTime === "object" && addedTime.ticks !== undefined) ? addedTime : kfTime;
       try {
-        _applyKeyValueAtTime(prop, value, kfTime, param ? param.controlType : null);
+        _applyKeyValueAtTime(prop, value, useTime, param ? param.controlType : null);
       } catch (eSet) {}
-      _applyTemporalInterpolation(prop, kfTime, parts);
+      _applyTemporalInterpolation(prop, useTime, parts);
     }
 
     // Default behavior: preserve the main keyframes and apply Premiere's
@@ -4311,4 +4883,168 @@ function _applyKeyframes(prop, keyframesStr, param, timingInfo) {
     // disabled in the stable path because it is not consistently faithful
     // across real-world presets.
   } catch(e) { /* ignora erros de keyframe */ }
+}
+
+// ─── CLIP LABEL COLOR ──────────────────────────────────────────────────────────
+// There is no ExtendScript/QE API to set a label color directly on a TrackItem
+// (a clip already placed on the timeline) — only on ProjectItem (the source
+// media). TrackItems snapshot the project item's label at insert time; they
+// are not live-linked to it afterward (confirmed: changing a ProjectItem's
+// label does not retroactively affect clips already using it). Workaround:
+// set the label on the underlying source item, then replace the existing
+// clip in-place with a fresh instance from that now-relabeled item —
+// reusing the same trim/duration/effect-restoration machinery built for the
+// nest feature. This is a destructive replace, not a simple property set.
+
+// Preferred label path: invoke the same locale-independent command that
+// Premiere exposes in its keyboard-shortcut map. This changes the selected
+// TrackItems natively and does not replace clips or mutate their ProjectItems.
+function setClipLabelColorNative(labelIndex) {
+  try {
+    var sequence = app.project.activeSequence;
+    if (!sequence) return "no_active_sequence";
+
+    var selection = null;
+    try { selection = sequence.getSelection(); } catch (eSelection) {}
+    if (!selection || selection.length === 0) return "no_selection";
+
+    var index = Number(labelIndex);
+    if (isNaN(index) || index < 0 || index > 15 || Math.floor(index) !== index) {
+      return "invalid_label_index";
+    }
+
+    var commandKey = "cmd.sequence.edit.label." + String(index);
+    try {
+      if (typeof app.executeCommand === "function") {
+        var commandResult = app.executeCommand(commandKey);
+        if (commandResult !== false) return "ok_native:" + commandKey;
+      }
+    } catch (eCommand) {}
+
+    // Older ExtendScript hosts only accept a numeric menu-command id. Resolve
+    // it using the user's actual label name from Premiere preferences, so this
+    // also works when labels were renamed.
+    try {
+      if (typeof app.findMenuCommandId === "function" && typeof app.executeCommand === "function") {
+        var defaultNames = [
+          "Violet", "Iris", "Caribbean", "Lavender", "Cerulean", "Forest",
+          "Rose", "Mango", "Purple", "Blue", "Teal", "Magenta", "Tan",
+          "Green", "Brown", "Yellow"
+        ];
+        var candidates = [];
+        try {
+          var propertyName = "BE.Prefs.LabelNames." + String(index);
+          if (app.properties && app.properties.doesPropertyExist(propertyName)) {
+            var configuredName = String(app.properties.getProperty(propertyName) || "");
+            if (configuredName) candidates.push(configuredName);
+          }
+        } catch (ePreference) {}
+        candidates.push(defaultNames[index]);
+
+        for (var ci = 0; ci < candidates.length; ci++) {
+          var menuName = candidates[ci];
+          if (!menuName) continue;
+          var commandId = app.findMenuCommandId(menuName);
+          if (commandId && commandId > 0) {
+            app.executeCommand(commandId);
+            return "ok_native_menu:" + String(commandId) + ":" + menuName;
+          }
+        }
+      }
+    } catch (eMenuCommand) {}
+
+    return "command_unavailable";
+  } catch (e) {
+    return "error:" + String(e);
+  }
+}
+
+// Legacy experimental fallback. Kept for diagnostics only; the bridge no
+// longer calls it because replacing timeline clips can lose clip metadata.
+function setClipLabelColor(labelIndex) {
+  try {
+    var seq = app.project.activeSequence;
+    if (!seq) return "no_active_sequence";
+
+    var selection = seq.getSelection();
+    if (!selection || selection.length === 0) return "no_selection";
+
+    app.enableQE();
+    var qeSeq = null;
+    try { qeSeq = qe.project.getActiveSequence(); } catch (eQe) {}
+
+    var numVideoTracks = seq.videoTracks.numTracks;
+    var results = [];
+
+    for (var i = 0; i < selection.length; i++) {
+      var clip = selection[i];
+      try {
+        var projectItem = clip.projectItem;
+        if (!projectItem) { results.push("no_project_item"); continue; }
+
+        if (typeof projectItem.setColorLabel !== "function") {
+          return "error_no_setColorLabel_api";
+        }
+
+        var isAudio = _trackItemIsAudio(clip, clip.parentTrackIndex, numVideoTracks);
+        var trackIndex = clip.parentTrackIndex;
+        var startTicks = Number(clip.start.ticks) || 0;
+        var durationTicks = Number(clip.end.ticks) - Number(clip.start.ticks);
+        var mediaType = isAudio ? 2 : 1;
+
+        // Set the label on the source item BEFORE re-inserting.
+        try { projectItem.setColorLabel(labelIndex); } catch (eLabel) {
+          results.push("setColorLabel_failed:" + String(eLabel));
+          continue;
+        }
+
+        var snapshot = _snapshotProjectItemTrim(projectItem);
+        _setProjectItemTrimFromTrackItem(projectItem, clip, mediaType);
+
+        var track = isAudio ? seq.audioTracks[trackIndex] : seq.videoTracks[trackIndex];
+        if (!track) { results.push("no_track"); continue; }
+
+        // overwriteClip at the clip's own position replaces it in place —
+        // no separate removal step needed (and removing the stale `clip`
+        // reference afterward would be operating on an already-replaced
+        // TrackItem).
+        try {
+          track.overwriteClip(projectItem, String(startTicks));
+        } catch (eOv1) {
+          try { track.overwriteClip(projectItem, _timeFromTicks(startTicks)); } catch (eOv2) {}
+        }
+        _restoreProjectItemTrim(projectItem, snapshot, mediaType);
+
+        var newClip = _findClipByProjectItemAtStart(track, projectItem, startTicks);
+        if (!newClip) { results.push("relabel_insert_failed"); continue; }
+
+        try { newClip.end = _timeFromTicks(startTicks + durationTicks); } catch (eDur) {}
+
+        try {
+          var intrinsicNames = isAudio ? ["Volume", "Channel Volume", "Panner"] : ["Motion", "Opacity"];
+          for (var ni = 0; ni < intrinsicNames.length; ni++) {
+            var srcComp = _findClipComponent(clip, intrinsicNames[ni], null);
+            var dstComp = _findClipComponent(newClip, intrinsicNames[ni], null);
+            if (srcComp && dstComp) _cloneComponentParams(srcComp, dstComp);
+          }
+        } catch (eIntrinsic) {}
+
+        try {
+          if (qeSeq) {
+            var qeTrack = isAudio ? qeSeq.getAudioTrackAt(trackIndex) : qeSeq.getVideoTrackAt(trackIndex);
+            var newQeClip = qeTrack ? _findQeClipOnTrack(qeTrack, startTicks) : null;
+            if (newQeClip) _cloneExtraComponentsToInsertedClip(clip, newClip, newQeClip, isAudio);
+          }
+        } catch (eExtra) {}
+
+        results.push("ok");
+      } catch (eClip) {
+        results.push("error:" + String(eClip));
+      }
+    }
+
+    return results.join(",");
+  } catch (e) {
+    return "error:" + String(e);
+  }
 }

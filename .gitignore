@@ -22,3 +22,4 @@ data/worker.log
 .debug
 template_project/*.prin
 template_project/Adobe Premiere Pro Auto-Save/
+settings.json

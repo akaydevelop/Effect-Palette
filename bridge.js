@@ -1,4 +1,4 @@
-﻿/**
+/**
  * bridge.js
  * Funciona em dois contextos:
  *   worker.html  — headless, sem UI, carrega automaticamente com o Premiere
@@ -81,6 +81,8 @@ let presetFileMtime    = 0;
 let lastProjectIdentity = "";
 let lastProjectIdentityCheckAt = 0;
 let lastProjectItemsRefreshAt = 0;
+let nativeNestWatchTimer = null;
+let nativeNestWatchToken = 0;
 let projectItemsRefreshPending = false;
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -658,6 +660,22 @@ function startPolling() {
             insertGenericItem(cmd);
           } else if (cmd.command === "insertFavoriteItem") {
             insertFavoriteItem(cmd);
+          } else if (cmd.command === "setLabel") {
+            setLabel(cmd);
+          } else if (cmd.command === "nestSelection") {
+            nestSelection(cmd);
+          } else if (cmd.command === "nestSelectionApi") {
+            nestSelectionApi(cmd);
+          } else if (cmd.command === "organizeNestSequence") {
+            organizeCreatedNest(cmd);
+          } else if (cmd.command === "watchNativeNest") {
+            armNativeNestWatcher(cmd);
+          } else if (cmd.command === "cancelNativeNestWatch") {
+            cancelNativeNestWatcher();
+          } else if (cmd.command === "exportSequences") {
+            markCmdStatus("processing");
+            exportSequences("manual");
+            markCmdStatus("done");
           } else if (cmd.command === "exportEffects") {
             markCmdStatus("processing");
             exportHostInfo("manual");
@@ -669,7 +687,7 @@ function startPolling() {
             markCmdStatus("done");
           } else if (cmd.command === "diagnose") {
             markCmdStatus("processing");
-            evalHostScript("diagnose()", function(result) {
+            evalHostScript("diagnoseNestCapabilities()", function(result) {
       writeSafe(LOG_FILE, result);
               log("Diagnóstico gravado", "ok");
               markCmdStatus("done");
@@ -978,6 +996,208 @@ function insertFavoriteItem(cmd) {
       log("Erro: " + result, "err");
       markCmdStatus("error");
     }
+  });
+}
+
+function setLabel(cmd) {
+  const labelIndex = cmd.labelIndex;
+
+  log("→ Aplicando cor de label: " + labelIndex, "apply");
+  setStatus("Aplicando cor de label...", "waiting");
+  markCmdStatus("processing");
+
+  const script = 'setClipLabelColorNative(' + JSON.stringify(labelIndex) + ')';
+
+  evalHostScript(script, function(result) {
+    if (result === "no_selection" || result === "no_active_sequence") {
+      setStatus("Sem seleção ativa", "waiting");
+      log("⚠ Nenhuma seleção para colorir", "warn");
+      markCmdStatus("error_no_selection");
+    } else if (result === "command_unavailable") {
+      setStatus("Comando nativo de label indisponível", "error");
+      log("⚠ O Premiere não aceitou o comando interno de label", "warn");
+      markCmdStatus("error_command_unavailable");
+    } else if (result === "invalid_label_index") {
+      setStatus("Índice de label inválido", "error");
+      markCmdStatus("error");
+    } else if (result && result.indexOf("error:") === 0) {
+      setStatus("Erro ao aplicar cor de label", "error");
+      log("Erro: " + result, "err");
+      markCmdStatus("error");
+    } else {
+      // result is a comma-joined per-clip status list, e.g. "ok,ok,relabel_insert_failed"
+      setStatus("Conectado", "ok");
+      log("✓ Label aplicado: " + result, "ok");
+      markCmdStatus("done");
+    }
+  });
+}
+
+// Execute Premiere's real Nest command instead of rebuilding selected clips.
+// This preserves the native naming dialog and Premiere's handling of linked
+// audio, multiple tracks, effects and clip metadata.
+function nestSelection(cmd) {
+  log("Aninhando clipes selecionados", "apply");
+  setStatus("Aninhando selecao...", "waiting");
+  markCmdStatus("processing");
+
+  const script = 'nestSelectedClips(' + JSON.stringify(lastSelectionJSON) + ')';
+
+  evalHostScript(script, function(result) {
+    if (result === "ok") {
+      appliedCount++;
+      updateCount("count-applied", appliedCount);
+      setStatus("Conectado", "ok");
+      log("Comando Nest executado", "ok");
+      markCmdStatus("done");
+    } else if (result === "no_selection") {
+      setStatus("Sem clipes selecionados", "waiting");
+      log("Nenhum clipe selecionado para aninhar", "warn");
+      markCmdStatus("error_no_selection");
+    } else if (result === "no_sequence") {
+      setStatus("Sem sequencia ativa", "waiting");
+      log("Nenhuma sequencia ativa para aninhar", "warn");
+      markCmdStatus("error_no_sequence");
+    } else if (result === "command_unavailable") {
+      setStatus("Comando Nest indisponivel", "error");
+      log("Esta versao do Premiere nao expos o comando Nest", "warn");
+      markCmdStatus("error_command_unavailable");
+    } else {
+      setStatus("Erro ao aninhar", "error");
+      log("Erro no Nest: " + result, "err");
+      markCmdStatus("error");
+    }
+  });
+}
+
+function nestSelectionApi(cmd) {
+  log("Aninhando selecao pela API", "apply");
+  setStatus("Aninhando pela API...", "waiting");
+  markCmdStatus("processing");
+
+  const script = 'nestSelectedClipsViaAPI(' +
+    JSON.stringify(lastSelectionJSON) + ', ' +
+    JSON.stringify(cmd.nestName || "") + ', ' +
+    JSON.stringify(cmd.nestBin || "Nested Sequences") + ')';
+
+  evalHostScript(script, function(result) {
+    if (result && result.indexOf("ok:") === 0) {
+      appliedCount++;
+      updateCount("count-applied", appliedCount);
+      setStatus("Conectado", "ok");
+      log("Nest API concluido: " + result, "ok");
+      markCmdStatus("done");
+    } else if (result === "no_selection") {
+      setStatus("Sem clipes selecionados", "waiting");
+      log("Nenhum clipe selecionado para aninhar", "warn");
+      markCmdStatus("error_no_selection");
+    } else if (result === "no_sequence") {
+      setStatus("Sem sequencia ativa", "waiting");
+      log("Nenhuma sequencia ativa para aninhar", "warn");
+      markCmdStatus("error_no_sequence");
+    } else if (result === "api_unavailable") {
+      setStatus("API createSubsequence indisponivel", "error");
+      log("Sequence.createSubsequence nao esta disponivel", "warn");
+      markCmdStatus("error_api_unavailable");
+    } else if (result && result.indexOf("insert_failed") === 0) {
+      setStatus("Falha ao inserir a subsequencia", "error");
+      log("A subsequencia foi preservada para diagnostico: " + result, "err");
+      markCmdStatus("error_not_inserted");
+    } else if (result === "unsafe_overlap") {
+      setStatus("Ha clipes nao selecionados na faixa de destino", "error");
+      log("Nest API cancelado para nao sobrescrever clipes fora da selecao", "warn");
+      markCmdStatus("error_unsafe_overlap");
+    } else {
+      setStatus("Erro ao aninhar pela API", "error");
+      log("Erro no Nest API: " + result, "err");
+      markCmdStatus("error");
+    }
+  });
+}
+
+function organizeCreatedNest(cmd, trackStatus) {
+  const shouldTrackStatus = trackStatus !== false;
+  if (shouldTrackStatus) markCmdStatus("processing");
+  const script = 'organizeNestSequence(' +
+    JSON.stringify(cmd.sequenceID || "") + ', ' +
+    JSON.stringify(cmd.nestName || "") + ', ' +
+    JSON.stringify(cmd.nestBin || "Nested Sequences") + ')';
+
+  evalHostScript(script, function(result) {
+    if (result && result.indexOf("ok:") === 0) {
+      log("Nest nativo organizado: " + result, "ok");
+      if (shouldTrackStatus) markCmdStatus("done");
+      exportProjectItems("Nest organizado");
+      exportSequences("Nest organizado");
+    } else if (result === "not_found") {
+      log("Sequencia criada pelo Nest nao foi encontrada", "warn");
+      if (shouldTrackStatus) markCmdStatus("error_not_found");
+    } else {
+      log("Erro ao organizar Nest: " + result, "err");
+      if (shouldTrackStatus) markCmdStatus("error");
+    }
+  });
+}
+
+function cancelNativeNestWatcher() {
+  nativeNestWatchToken++;
+  if (nativeNestWatchTimer) clearInterval(nativeNestWatchTimer);
+  nativeNestWatchTimer = null;
+  markCmdStatus("done");
+}
+
+function armNativeNestWatcher(cmd) {
+  nativeNestWatchToken++;
+  const watchToken = nativeNestWatchToken;
+  if (nativeNestWatchTimer) {
+    clearInterval(nativeNestWatchTimer);
+    nativeNestWatchTimer = null;
+  }
+
+  evalHostScript("getSequencesListSafe()", function(result) {
+    if (watchToken !== nativeNestWatchToken) return;
+    const baseline = {};
+    try {
+      JSON.parse(result || "[]").forEach(function(sequence) {
+        if (sequence && sequence.sequenceID) baseline[String(sequence.sequenceID)] = true;
+      });
+    } catch (e) {
+      log("Nao foi possivel preparar a organizacao do Nest nativo", "warn");
+      markCmdStatus("error");
+      return;
+    }
+
+    const startedAt = Date.now();
+    markCmdStatus("done");
+    nativeNestWatchTimer = setInterval(function() {
+      if (watchToken !== nativeNestWatchToken) return;
+      if (Date.now() - startedAt >= 120000) {
+        clearInterval(nativeNestWatchTimer);
+        nativeNestWatchTimer = null;
+        log("Tempo limite para organizar o Nest nativo", "warn");
+        return;
+      }
+
+      evalHostScript("getSequencesListSafe()", function(updatedResult) {
+        if (watchToken !== nativeNestWatchToken) return;
+        let sequences = [];
+        try { sequences = JSON.parse(updatedResult || "[]"); } catch (e) { return; }
+        let created = null;
+        for (let i = 0; i < sequences.length; i++) {
+          const sequenceID = sequences[i] && String(sequences[i].sequenceID || "");
+          if (sequenceID && !baseline[sequenceID]) created = sequences[i];
+        }
+        if (!created || !created.sequenceID) return;
+
+        clearInterval(nativeNestWatchTimer);
+        nativeNestWatchTimer = null;
+        organizeCreatedNest({
+          sequenceID: String(created.sequenceID),
+          nestName: cmd.nestName || "",
+          nestBin: cmd.nestBin || "Nested Sequences",
+        }, false);
+      });
+    }, 750);
   });
 }
 

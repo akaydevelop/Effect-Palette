@@ -14,6 +14,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import unicodedata
+import xml.etree.ElementTree as ET
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,6 +103,184 @@ BRIDGE_FILE = EXT_DATA / "premiere_cmd.json"
 SELECTION_FILE = EXT_DATA / "current_selection.json"
 GOOGLE_SANS_FLEX_REGULAR = FONTS_DIR / "GoogleSansFlex-Regular.ttf"
 GOOGLE_SANS_FLEX_MEDIUM = FONTS_DIR / "GoogleSansFlex-Medium.ttf"
+
+# ─── Language / i18n ──────────────────────────────────────────────────────────
+
+SETTINGS_FILE = APPDATA / "Adobe" / "CEP" / "extensions" / "EffectPalette" / "settings.json"
+SUPPORTED_LANGUAGES = ("en", "pt")
+NEST_MODES = ("auto", "premiere", "api")
+DEFAULT_NEST_BIN = "Nested Sequences"
+
+
+def _load_settings_data() -> dict:
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as file_obj:
+            data = json.load(file_obj)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_settings_data(data: dict) -> None:
+    try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        write_safe(SETTINGS_FILE, json.dumps(data, indent=2, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _load_language() -> str:
+    lang = _load_settings_data().get("language", "en")
+    return lang if lang in SUPPORTED_LANGUAGES else "en"
+
+
+def _save_language(lang: str) -> None:
+    data = _load_settings_data()
+    data["language"] = lang
+    _save_settings_data(data)
+
+
+def load_nest_preferences() -> dict[str, str]:
+    raw = _load_settings_data().get("nest", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    mode = str(raw.get("mode", "auto")).lower()
+    if mode not in NEST_MODES:
+        mode = "auto"
+    return {"mode": mode}
+
+
+def save_nest_preferences(mode: str) -> None:
+    data = _load_settings_data()
+    data["nest"] = {"mode": mode if mode in NEST_MODES else "auto"}
+    _save_settings_data(data)
+
+
+CURRENT_LANGUAGE = _load_language()
+
+
+def set_language(lang: str) -> None:
+    global CURRENT_LANGUAGE
+    if lang not in SUPPORTED_LANGUAGES or lang == CURRENT_LANGUAGE:
+        return
+    CURRENT_LANGUAGE = lang
+    _save_language(lang)
+
+
+STRINGS: dict[str, dict[str, str]] = {
+    # Footer hint
+    "footer_hint": {"en": "[↑↓] navigate  [↵] apply  [esc] close", "pt": "[↑↓] navegar  [↵] aplicar  [esc] fechar"},
+    # Status / apply flow
+    "status_requesting_refresh": {"en": "Requesting update from Premiere...", "pt": "Solicitando atualizacao ao Premiere..."},
+    "status_no_response": {"en": "Premiere did not respond", "pt": "Premiere nao respondeu"},
+    "status_applied": {"en": "[Applied] {name}", "pt": "[Aplicado] {name}"},
+    "status_send_failed": {"en": "Failed to send command", "pt": "Falha ao enviar comando"},
+    "status_apply_cancelled": {"en": "Application cancelled", "pt": "Aplicacao cancelada"},
+    "status_no_results": {"en": "0 results", "pt": "0 resultados"},
+    "status_results_count": {"en": "{visible}/{total} results", "pt": "{visible}/{total} resultados"},
+    "status_shortcut_unavailable": {"en": "Nest has no keyboard shortcut in Premiere", "pt": "Nest nao possui atalho configurado no Premiere"},
+    "status_premiere_window_unavailable": {"en": "Premiere window unavailable", "pt": "Janela do Premiere indisponivel"},
+    "status_label_shortcut_unavailable": {"en": "Label shortcut unavailable", "pt": "Atalho de label indisponivel"},
+    "no_results_helper": {"en": "No results", "pt": "Nenhum resultado"},
+    "action_applying": {"en": "Applying", "pt": "Aplicando"},
+    "action_applying_preset": {"en": "Applying preset", "pt": "Aplicando preset"},
+    "action_applying_transition": {"en": "Applying transition", "pt": "Aplicando transicao"},
+    "action_inserting": {"en": "Inserting", "pt": "Inserindo"},
+    "action_executing": {"en": "Executing", "pt": "Executando"},
+    # Transition placement dialog
+    "transition_dialog_title": {"en": "Transition position", "pt": "Posicao da transicao"},
+    "transition_dialog_question": {"en": "Where do you want to apply the transition?", "pt": "Onde voce quer aplicar a transicao?"},
+    "transition_dialog_auto_desc": {
+        "en": "Automatic uses Premiere's current behavior: between two clips when there's a cut, or at the end of the clip when that makes sense.",
+        "pt": "Automatico usa o comportamento atual do Premiere: entre dois clips quando houver corte, ou no fim do clip quando fizer sentido.",
+    },
+    "transition_dialog_start": {"en": "Start", "pt": "Inicio"},
+    "transition_dialog_end": {"en": "End", "pt": "Fim"},
+    "transition_dialog_auto": {"en": "Automatic", "pt": "Automatico"},
+    # System tray menu
+    "tray_open_palette": {"en": "Open palette", "pt": "Abrir paleta"},
+    "tray_toggle_palette": {"en": "Show/Hide palette", "pt": "Mostrar/Ocultar paleta"},
+    "tray_debug_window": {"en": "Debug window", "pt": "Janela de debug"},
+    "tray_generate_beta_report": {"en": "Generate beta report", "pt": "Gerar relatorio beta"},
+    "tray_open_report_folder": {"en": "Open reports folder", "pt": "Abrir pasta de relatorios"},
+    "tray_language": {"en": "Language", "pt": "Idioma"},
+    "tray_language_en": {"en": "English", "pt": "Ingles"},
+    # Inline Nest configuration
+    "nest_dialog_title": {"en": "Create Nest", "pt": "Criar Nest"},
+    "timeline_action_nest": {"en": "Nest clips", "pt": "Aninhar clipes"},
+    "nest_dialog_question": {"en": "Create a nested sequence", "pt": "Criar sequencia aninhada"},
+    "nest_mode_label": {"en": "Method", "pt": "Metodo"},
+    "nest_mode_auto": {"en": "Automatic", "pt": "Automatico"},
+    "nest_mode_premiere": {"en": "Premiere", "pt": "Premiere"},
+    "nest_mode_api": {"en": "Extension API", "pt": "API da extensao"},
+    "nest_mode_auto_desc": {
+        "en": "Chooses Premiere for simple selections and the API when audio should be collapsed to one track.",
+        "pt": "Usa o Premiere em selecoes simples e a API quando o audio deve ser unido em uma faixa.",
+    },
+    "nest_mode_premiere_desc": {
+        "en": "Uses Premiere's native Nest command and automatically confirms its naming window.",
+        "pt": "Usa o comando Nest nativo e confirma automaticamente a janela de nome.",
+    },
+    "nest_mode_api_desc": {
+        "en": "Creates a subsequence directly and collapses the result to one video and one audio track.",
+        "pt": "Cria a subsequencia diretamente e une o resultado em uma faixa de video e uma de audio.",
+    },
+    "nest_name_label": {"en": "Sequence name (optional)", "pt": "Nome da sequencia (opcional)"},
+    "nest_name_hint": {"en": "Empty generates FXN-001, FXN-002...", "pt": "Vazio gera FXN-001, FXN-002..."},
+    "nest_cancel": {"en": "Cancel", "pt": "Cancelar"},
+    "nest_confirm": {"en": "Create Nest", "pt": "Criar Nest"},
+    "nest_footer_hint": {"en": "[enter] create  [esc] cancel", "pt": "[enter] criar  [esc] cancelar"},
+    "tray_language_pt": {"en": "Portuguese", "pt": "Portugues"},
+    "tray_quit": {"en": "Quit", "pt": "Sair"},
+    "tray_language_restart_title": {"en": "FX.palette", "pt": "FX.palette"},
+    "tray_language_restart_body": {
+        "en": "Language changed. Restart FX.palette for it to take effect.",
+        "pt": "Idioma alterado. Reinicie o FX.palette para aplicar.",
+    },
+    # Bridge failure labels
+    "bridge_error_no_selection": {"en": "No selection available", "pt": "Nenhuma selecao disponivel"},
+    "bridge_error_no_sequence": {"en": "No active sequence", "pt": "Nenhuma sequencia ativa"},
+    "bridge_error_not_found": {"en": "Item not found", "pt": "Item nao encontrado"},
+    "bridge_error_not_inserted": {"en": "Item not inserted", "pt": "Item nao inserido"},
+    "bridge_error_template_missing": {"en": "Missing template", "pt": "Template ausente"},
+    "bridge_error_create_failed": {"en": "Failed to create item", "pt": "Falha ao criar item"},
+    "bridge_error_not_supported": {"en": "Unsupported item", "pt": "Item nao suportado"},
+    "bridge_error_command_unavailable": {"en": "Premiere command unavailable", "pt": "Comando indisponivel no Premiere"},
+    "bridge_error_api_unavailable": {"en": "Premiere subsequence API unavailable", "pt": "API de subsequencia indisponivel no Premiere"},
+    "bridge_error_unsafe_overlap": {"en": "Unselected clips overlap the destination track", "pt": "Ha clipes nao selecionados na faixa de destino"},
+    "bridge_error_generic": {"en": "Failed to apply", "pt": "Falha ao aplicar"},
+}
+
+
+def tr(key: str, **kwargs) -> str:
+    entry = STRINGS.get(key)
+    if entry is None:
+        return key
+    text = entry.get(CURRENT_LANGUAGE) or entry.get("en") or key
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except Exception:
+            return text
+    return text
+
+
+CATEGORY_DISPLAY_LABELS: dict[str, dict[str, str]] = {
+    "Todos": {"en": "All", "pt": "Todos"},
+    "Video": {"en": "Video", "pt": "Video"},
+    "Audio": {"en": "Audio", "pt": "Audio"},
+    "Transicoes": {"en": "Transitions", "pt": "Transicoes"},
+    "Presets": {"en": "Presets", "pt": "Presets"},
+    "Projeto": {"en": "Project", "pt": "Projeto"},
+    "Favoritos": {"en": "Favorites", "pt": "Favoritos"},
+}
+
+
+def tr_category(cat: str) -> str:
+    entry = CATEGORY_DISPLAY_LABELS.get(cat)
+    if not entry:
+        return cat
+    return entry.get(CURRENT_LANGUAGE) or entry.get("en") or cat
 
 WATCH_INTERVAL = 3.0
 ENABLE_DEBUG_HOTKEY = os.environ.get("EFFECT_PALETTE_ENABLE_DEBUG_HOTKEY", "").lower() in {"1", "true", "yes", "on"}
@@ -196,6 +375,16 @@ GENERIC_ITEMS = [
     {"name": "Transparent Video", "category": "Favoritos", "type": "generic_item", "genericKey": "transparent_video"},
 ]
 
+TIMELINE_ACTIONS = [
+    {
+        "name": tr("timeline_action_nest"),
+        "searchText": "Nest clips Aninhar clipes",
+        "category": "Timeline",
+        "type": "timeline_action",
+        "action": "nest",
+    },
+]
+
 BG = "#0D0C14"
 BG2 = "#111019"
 BORDER = "#2A2A35"
@@ -249,12 +438,16 @@ ITEM_TYPE_FILTER_KEYS = {
     "generic_item": "Favoritos",
     "favorite_item": "Favoritos",
     "favorite": "Favoritos",
+    "timeline_action": "Todos",
 }
 
 for _generic_item in GENERIC_ITEMS:
     _generic_item["category"] = "Favoritos"
 
 IS_WINDOWS = os.name == "nt"
+SINGLE_INSTANCE_MUTEX_NAME = "Local\\FX.palette.Application"
+ERROR_ALREADY_EXISTS = 183
+_single_instance_mutex_handle = None
 
 if IS_WINDOWS:
     try:
@@ -269,6 +462,45 @@ else:
     USER32 = None
     SW_SHOWNORMAL = 1
     SW_RESTORE = 9
+
+
+def acquire_single_instance_lock() -> bool:
+    """Keep only one FX.palette process alive per Windows user session."""
+    global _single_instance_mutex_handle
+    if not IS_WINDOWS:
+        return True
+    if _single_instance_mutex_handle:
+        return True
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX_NAME)
+        if not handle:
+            return True
+        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        _single_instance_mutex_handle = (kernel32, handle)
+        return True
+    except Exception as exc:
+        beta_report.log_exception("Single-instance lock failed", exc)
+        return True
+
+
+def release_single_instance_lock() -> None:
+    global _single_instance_mutex_handle
+    lock = _single_instance_mutex_handle
+    _single_instance_mutex_handle = None
+    if not lock:
+        return
+    kernel32, handle = lock
+    try:
+        kernel32.CloseHandle(handle)
+    except Exception as exc:
+        beta_report.log_exception("Single-instance lock release failed", exc)
 
 
 @dataclass(frozen=True)
@@ -291,6 +523,199 @@ class HotkeySpec:
     requires_premiere_focus: bool
     callback_name: str
 
+
+@dataclass(frozen=True)
+class PremiereCommandShortcut:
+    vk: int
+    ctrl: bool = False
+    alt: bool = False
+    shift: bool = False
+
+
+def _xml_bool(value: str | None) -> bool:
+    return str(value or "").strip().lower() == "true"
+
+
+def parse_premiere_command_shortcut(kys_file: Path, command_name: str) -> PremiereCommandShortcut | None:
+    """Read one Premiere keyboard command from a .kys shortcut file."""
+    try:
+        root = ET.parse(kys_file).getroot()
+    except (OSError, ET.ParseError):
+        return None
+
+    for item in root.iter():
+        try:
+            if item.findtext("commandname", "").strip() != command_name:
+                continue
+            raw_virtual_key = int(item.findtext("virtualkey", "0"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+
+        # Premiere stores keyboard virtual keys with a high-bit marker.
+        vk = raw_virtual_key & 0xFFFF
+        # Premiere stores printable letter shortcuts as lowercase character
+        # codes, while Windows SendInput expects the uppercase virtual-key code.
+        if ord("a") <= vk <= ord("z"):
+            vk = ord(chr(vk).upper())
+        if vk <= 0 or vk > 0xFF:
+            continue
+        return PremiereCommandShortcut(
+            vk=vk,
+            ctrl=_xml_bool(item.findtext("modifier.ctrl")),
+            alt=_xml_bool(item.findtext("modifier.alt")),
+            shift=_xml_bool(item.findtext("modifier.shift")),
+        )
+    return None
+
+
+def find_premiere_command_shortcut(command_name: str) -> tuple[PremiereCommandShortcut | None, Path | None]:
+    documents = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents"
+    shortcuts_root = documents / "Adobe" / "Premiere Pro"
+    if not shortcuts_root.exists():
+        return None, None
+
+    try:
+        candidates = sorted(
+            shortcuts_root.glob("*/Profile-*/Win/*.kys"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        candidates = []
+
+    for candidate in candidates:
+        shortcut = parse_premiere_command_shortcut(candidate, command_name)
+        if shortcut is not None:
+            return shortcut, candidate
+    return None, None
+
+
+def send_native_shortcut(shortcut: PremiereCommandShortcut) -> bool:
+    if not IS_WINDOWS or USER32 is None:
+        return False
+
+    key_event_up = 0x0002
+    modifier_keys = []
+    if shortcut.ctrl:
+        modifier_keys.append(0x11)  # VK_CONTROL
+    if shortcut.alt:
+        modifier_keys.append(0x12)  # VK_MENU
+    if shortcut.shift:
+        modifier_keys.append(0x10)  # VK_SHIFT
+
+    pressed = []
+    try:
+        for vk in modifier_keys:
+            USER32.keybd_event(vk, 0, 0, 0)
+            pressed.append(vk)
+        USER32.keybd_event(shortcut.vk, 0, 0, 0)
+        pressed.append(shortcut.vk)
+        USER32.keybd_event(shortcut.vk, 0, key_event_up, 0)
+        pressed.pop()
+        for vk in reversed(modifier_keys):
+            USER32.keybd_event(vk, 0, key_event_up, 0)
+            if vk in pressed:
+                pressed.remove(vk)
+        return True
+    except Exception:
+        for vk in reversed(pressed):
+            try:
+                USER32.keybd_event(vk, 0, key_event_up, 0)
+            except Exception:
+                pass
+        return False
+
+
+def native_window_process_id(hwnd: int | None) -> int | None:
+    if not IS_WINDOWS or USER32 is None or not hwnd:
+        return None
+    try:
+        process_id = wintypes.DWORD()
+        USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(process_id))
+        return int(process_id.value) if process_id.value else None
+    except Exception:
+        return None
+
+
+def send_native_unicode_text(text: str) -> bool:
+    if not text:
+        return True
+    if not IS_WINDOWS or USER32 is None:
+        return False
+
+    keyeventf_keyup = 0x0002
+    keyeventf_unicode = 0x0004
+    input_keyboard = 1
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.c_size_t),
+        ]
+
+    class INPUTUNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("union",)
+        _fields_ = [("type", wintypes.DWORD), ("union", INPUTUNION)]
+
+    try:
+        utf16 = text.encode("utf-16-le")
+        for offset in range(0, len(utf16), 2):
+            code_unit = int.from_bytes(utf16[offset:offset + 2], "little")
+            events = (INPUT * 2)()
+            events[0].type = input_keyboard
+            events[0].ki = KEYBDINPUT(0, code_unit, keyeventf_unicode, 0, 0)
+            events[1].type = input_keyboard
+            events[1].ki = KEYBDINPUT(0, code_unit, keyeventf_unicode | keyeventf_keyup, 0, 0)
+            if USER32.SendInput(2, events, ctypes.sizeof(INPUT)) != 2:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def fill_and_confirm_native_nest_dialog(nest_name: str) -> bool:
+    if nest_name:
+        if not send_native_shortcut(PremiereCommandShortcut(vk=0x41, ctrl=True)):  # Ctrl+A
+            return False
+        if not send_native_unicode_text(nest_name):
+            return False
+    return send_native_shortcut(PremiereCommandShortcut(vk=0x0D))  # Enter
+
+
+def schedule_native_nest_dialog_confirmation(palette, premiere_hwnd: int, nest_name: str) -> None:
+    premiere_process_id = native_window_process_id(premiere_hwnd)
+    if premiere_process_id is None:
+        beta_report.write_event("native_nest_dialog_autofill_unavailable", {"reason": "process_unknown"})
+        return
+
+    deadline = time.monotonic() + 3.0
+
+    def poll():
+        foreground_hwnd = foreground_window_handle_native()
+        foreground_process_id = native_window_process_id(foreground_hwnd)
+        if (
+            foreground_hwnd
+            and foreground_hwnd != premiere_hwnd
+            and foreground_process_id == premiere_process_id
+        ):
+            confirmed = fill_and_confirm_native_nest_dialog(nest_name)
+            beta_report.write_event("native_nest_dialog_autofill", {
+                "confirmed": confirmed,
+                "custom_name": bool(nest_name),
+            })
+            return
+        if time.monotonic() >= deadline:
+            beta_report.write_event("native_nest_dialog_autofill_unavailable", {"reason": "dialog_timeout"})
+            return
+        palette.root.after(50, poll)
+
+    palette.root.after(100, poll)
 
 @dataclass(frozen=True)
 class IndexedItem:
@@ -325,6 +750,7 @@ class ResultRowModel:
     icon_kind: str
     is_favorite: bool
     accent_kind: str
+    accent_color: str | None = None
 
 
 @dataclass
@@ -567,6 +993,120 @@ class LoaderSnapshot:
         return len(self.generic_items)
 
 
+SLASH_COMMAND_CATEGORIES: dict[str, str | None] = {
+    "video": "Video", "vid": "Video", "v": "Video",
+    "audio": "Audio", "aud": "Audio", "a": "Audio",
+    "trans": "Transicoes", "transition": "Transicoes", "transitions": "Transicoes",
+    "transicao": "Transicoes", "transicoes": "Transicoes", "t": "Transicoes",
+    "pset": "Presets", "preset": "Presets", "presets": "Presets", "p": "Presets",
+    "proj": "Projeto", "project": "Projeto", "projeto": "Projeto",
+    "fav": "Favoritos", "favorite": "Favoritos", "favorites": "Favoritos",
+    "favorito": "Favoritos", "favoritos": "Favoritos", "f": "Favoritos",
+    "all": None, "todos": None, "clear": None,
+}
+
+
+def parse_slash_command(query: str) -> tuple[str, str | None, bool]:
+    """Detects a leading "/command" token in the raw search text.
+
+    Returns (effective_query, category, matched). `matched` is False when no
+    recognized command is present, in which case `category` should be
+    ignored entirely (the caller must leave the active category filter as-is,
+    so plain typing never overrides a pill click or an earlier command).
+    """
+    stripped = query.lstrip()
+    if not stripped.startswith("/"):
+        return query, None, False
+
+    parts = stripped[1:].split(None, 1)
+    if not parts:
+        return query, None, False
+
+    word = parts[0].lower()
+    if word not in SLASH_COMMAND_CATEGORIES:
+        return query, None, False
+
+    remainder = parts[1] if len(parts) > 1 else ""
+    return remainder, SLASH_COMMAND_CATEGORIES[word], True
+
+
+LABEL_COMMAND_WORDS = {"label", "labels", "lbl", "etiqueta", "etiquetas", "rotulo", "rotulos"}
+# Label names and colors are user-configurable. They are loaded from the same
+# Premiere profile that owns the active keyboard-shortcut preset.
+LABEL_COLOR_COUNT = 16
+DEFAULT_LABEL_NAMES = (
+    "Violet", "Iris", "Caribbean", "Lavender", "Cerulean", "Forest", "Rose", "Mango",
+    "Purple", "Blue", "Teal", "Magenta", "Tan", "Green", "Brown", "Yellow",
+)
+_label_preferences_cache: tuple[Path | None, int | None, tuple[dict, ...]] | None = None
+
+
+def premiere_label_color_to_hex(raw_value) -> str:
+    try:
+        packed = int(str(raw_value).strip()) & 0xFFFFFF
+    except (TypeError, ValueError):
+        return "#808080"
+    red = packed & 0xFF
+    green = (packed >> 8) & 0xFF
+    blue = (packed >> 16) & 0xFF
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def load_premiere_label_preferences() -> tuple[dict, ...]:
+    global _label_preferences_cache
+    if _label_preferences_cache:
+        prefs_file = _label_preferences_cache[0]
+    else:
+        _shortcut, shortcut_file = find_premiere_command_shortcut("cmd.edit.label.0")
+        prefs_file = shortcut_file.parent.parent / "Adobe Premiere Pro Prefs" if shortcut_file else None
+    try:
+        mtime_ns = prefs_file.stat().st_mtime_ns if prefs_file and prefs_file.exists() else None
+    except OSError:
+        mtime_ns = None
+    if _label_preferences_cache and _label_preferences_cache[:2] == (prefs_file, mtime_ns):
+        return _label_preferences_cache[2]
+
+    names = list(DEFAULT_LABEL_NAMES)
+    colors = ["#808080"] * LABEL_COLOR_COUNT
+    if prefs_file and mtime_ns is not None:
+        try:
+            root = ET.parse(prefs_file).getroot()
+            values = {element.tag: (element.text or "") for element in root.iter()}
+            for index in range(LABEL_COLOR_COUNT):
+                names[index] = values.get(f"BE.Prefs.LabelNames.{index}", names[index]) or names[index]
+                colors[index] = premiere_label_color_to_hex(values.get(f"BE.Prefs.LabelColors.{index}"))
+        except (OSError, ET.ParseError):
+            pass
+
+    items = tuple({
+        "name": names[index], "category": "Label", "type": "label_color",
+        "labelIndex": index, "labelColor": colors[index],
+    } for index in range(LABEL_COLOR_COUNT))
+    _label_preferences_cache = (prefs_file, mtime_ns, items)
+    return items
+
+
+def parse_label_command(query: str) -> str | None:
+    """Return the optional color filter after a label command or alias."""
+    stripped = query.strip()
+    if not stripped:
+        return None
+    command_text = stripped[1:] if stripped.startswith("/") else stripped
+    parts = command_text.split(None, 1)
+    command_word = normalize_search_text(parts[0]) if parts else ""
+    if command_word not in LABEL_COMMAND_WORDS:
+        return None
+    return parts[1] if len(parts) > 1 else ""
+
+
+def build_label_color_items(filter_text: str) -> list[dict]:
+    items = [dict(item) for item in load_premiere_label_preferences()]
+    if filter_text:
+        normalized = normalize_search_text(filter_text)
+        items = [item for item in items if normalized in normalize_search_text(item["name"])]
+    return items
+
+
 def normalize_search_text(value: str) -> str:
     ascii_value = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii")
     return re.sub(r"\s+", " ", ascii_value.lower()).strip()
@@ -659,9 +1199,9 @@ def get_pill_visual_tokens(filter_key: str, *, active: bool) -> dict[str, str]:
     }
 
 
-def get_row_visual_tokens(accent_kind: str, *, selected: bool, hovered: bool) -> dict[str, str]:
+def get_row_visual_tokens(accent_kind: str, *, selected: bool, hovered: bool, accent_color: str | None = None) -> dict[str, str]:
     filter_key = filter_key_for_item_type(accent_kind)
-    pastel = get_filter_palette_color(filter_key)
+    pastel = accent_color or get_filter_palette_color(filter_key)
     if selected:
         bg = blend_colors(SURFACE_ALT, pastel, 0.22)
         border = blend_colors(ROW_BORDER, pastel, 0.75)
@@ -812,6 +1352,7 @@ def get_icon_glyph(icon_kind: str, *, ascii_only: bool = False) -> str:
         "preset": "PR",
         "project": "PJ",
         "favorite": "*",
+        "action": "N",
     }
     if ascii_only:
         return fallback.get(icon_kind, "•")
@@ -1047,7 +1588,8 @@ class EffectsLoader:
             load_issues.extend(favorite_issues)
 
         generic_items = tuple(dict(item) for item in GENERIC_ITEMS)
-        all_items = effects + presets + project_items + favorite_items + generic_items
+        timeline_actions = tuple(dict(item) for item in TIMELINE_ACTIONS)
+        all_items = effects + presets + project_items + favorite_items + generic_items + timeline_actions
         indexed_items, exact_name_map, prefix_map, token_prefix_map, trigram_map = self._build_indexes(all_items)
 
         return LoaderSnapshot(
@@ -1168,8 +1710,9 @@ class EffectsLoader:
         trigram_map: dict[str, list[int]] = {}
 
         for idx, item in enumerate(items):
-            normalized_name = normalize_search_text(item.get("name", ""))
-            tokens = tokenize_search_text(item.get("name", ""))
+            search_text = item.get("searchText") or item.get("name", "")
+            normalized_name = normalize_search_text(search_text)
+            tokens = tokenize_search_text(search_text)
             indexed = IndexedItem(
                 payload=item,
                 normalized_name=normalized_name,
@@ -1315,6 +1858,48 @@ def write_safe(file_path: Path, content: str):
         raise
 
 
+def _load_json_file(file_path: Path, fallback):
+    try:
+        with file_path.open(encoding="utf-8") as file_obj:
+            return json.load(file_obj)
+    except Exception:
+        return fallback
+
+
+def resolve_nest_mode(requested_mode: str) -> str:
+    if requested_mode in {"premiere", "api"}:
+        return requested_mode
+
+    selection = _load_json_file(SELECTION_FILE, [])
+    if not isinstance(selection, list):
+        selection = []
+    audio_tracks = {
+        int(item.get("trackIndex", -1))
+        for item in selection
+        if isinstance(item, dict) and item.get("isAudio") and str(item.get("trackIndex", "")).lstrip("-").isdigit()
+    }
+    has_audio = any(isinstance(item, dict) and item.get("isAudio") for item in selection)
+    has_video = any(isinstance(item, dict) and not item.get("isAudio") for item in selection)
+    if has_audio and (not has_video or len(audio_tracks) > 1):
+        return "api"
+
+    shortcut, _shortcut_file = find_premiere_command_shortcut("cmd.clip.nestify")
+    return "premiere" if shortcut is not None else "api"
+
+
+def arm_native_nest_watch(effect: dict) -> float:
+    payload = {
+        "command": "watchNativeNest",
+        "nestName": effect.get("nestName", ""),
+        "nestBin": DEFAULT_NEST_BIN,
+        "timestamp": time.time(),
+        "status": "pending",
+    }
+    BRIDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_safe(BRIDGE_FILE, json.dumps(payload, indent=2, ensure_ascii=False))
+    return float(payload["timestamp"])
+
+
 def send_command(effect: dict):
     beta_report.write_event("command_queued", {
         "name": effect.get("name", ""),
@@ -1369,6 +1954,29 @@ def send_command(effect: dict):
             "timestamp": time.time(),
             "status": "pending",
         }
+    elif effect.get("type") == "label_color":
+        payload = {
+            "command": "setLabel",
+            "labelIndex": effect.get("labelIndex", 0),
+            "timestamp": time.time(),
+            "status": "pending",
+        }
+    elif effect.get("type") == "timeline_action":
+        action = effect.get("action", "")
+        nest_mode = effect.get("nestMode", "api")
+        payload = {
+            "command": (
+                "nestSelectionApi"
+                if action == "nest" and nest_mode == "api"
+                else "nestSelection" if action == "nest" else "timelineAction"
+            ),
+            "action": action,
+            "nestMode": nest_mode,
+            "nestName": effect.get("nestName", ""),
+            "nestBin": DEFAULT_NEST_BIN,
+            "timestamp": time.time(),
+            "status": "pending",
+        }
     else:
         payload = {
             "command": "applyEffect",
@@ -1412,17 +2020,20 @@ def bridge_status_is_success(status: str | None) -> bool:
 
 def format_bridge_failure(status: str | None) -> str:
     if not status:
-        return "Premiere nao respondeu"
-    labels = {
-        "error_no_selection": "Nenhuma selecao disponivel",
-        "error_no_sequence": "Nenhuma sequencia ativa",
-        "error_not_found": "Item nao encontrado",
-        "error_not_inserted": "Item nao inserido",
-        "error_template_missing": "Template ausente",
-        "error_create_failed": "Falha ao criar item",
-        "error_not_supported": "Item nao suportado",
+        return tr("status_no_response")
+    keys = {
+        "error_no_selection": "bridge_error_no_selection",
+        "error_no_sequence": "bridge_error_no_sequence",
+        "error_not_found": "bridge_error_not_found",
+        "error_not_inserted": "bridge_error_not_inserted",
+        "error_template_missing": "bridge_error_template_missing",
+        "error_create_failed": "bridge_error_create_failed",
+        "error_not_supported": "bridge_error_not_supported",
+        "error_command_unavailable": "bridge_error_command_unavailable",
+        "error_api_unavailable": "bridge_error_api_unavailable",
+        "error_unsafe_overlap": "bridge_error_unsafe_overlap",
     }
-    return labels.get(status, "Falha ao aplicar")
+    return tr(keys.get(status, "bridge_error_generic"))
 
 
 def _premiere_process_via_toolhelp() -> bool | None:
@@ -1560,37 +2171,19 @@ def send_debug_command(command: str):
     print(f"[Bridge] Comando enviado: {command}")
 
 
-def preset_has_keyframes(effect: dict) -> bool:
-    if effect.get("type") != "preset":
-        return False
-    for filter_preset in effect.get("filterPresets", []):
-        for param in filter_preset.get("params", []):
-            if param.get("keyframes"):
-                return True
-    return False
+def dispatch_when_native_nest_watch_ready(palette, watch_timestamp: float, dispatch) -> None:
+    deadline = time.monotonic() + 2.0
 
+    def poll():
+        status = read_bridge_status(watch_timestamp)
+        if status == "done" or time.monotonic() >= deadline:
+            if status != "done":
+                beta_report.write_event("native_nest_watch_arm_timeout", {"status": status or "unknown"})
+            dispatch()
+            return
+        palette.root.after(50, poll)
 
-def load_current_selection(paths: DataPaths | None = None) -> list:
-    data_paths = paths or DataPaths()
-    if not data_paths.selection_file.exists():
-        return []
-    try:
-        with open(data_paths.selection_file, encoding="utf-8") as file_obj:
-            data = json.load(file_obj)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def selection_has_infinite_warning_targets(selection: list) -> bool:
-    for item in selection:
-        if not isinstance(item, dict):
-            continue
-        if item.get("isAudio"):
-            continue
-        if item.get("isAdjustmentLike") or item.get("isImageLike"):
-            return True
-    return False
+    palette.root.after(50, poll)
 
 
 def foreground_window_title_native() -> str | None:
@@ -2054,7 +2647,7 @@ class PaletteResultsController:
         model = row.model
         selected = row.index == self.selected_index
         hovered = row.index == self.hover_index
-        colors = get_row_visual_tokens(model.accent_kind, selected=selected, hovered=hovered)
+        colors = get_row_visual_tokens(model.accent_kind, selected=selected, hovered=hovered, accent_color=model.accent_color)
         if _rr_cache:
             bg_w = getattr(row, "_bg_w", 10)
             badge_w = getattr(row, "_badge_w", 52)
@@ -2201,6 +2794,7 @@ class EffectPalette:
         self._apply_started_at = None
         self._apply_last_status = None
         self._current_apply_effect: dict = {}
+        self._previous_foreground_hwnd = None
         self._mouse_listener = None
         self._build()
         self._start_file_watcher()
@@ -2318,14 +2912,15 @@ class EffectPalette:
 
         self.footer = tk.Frame(self.body_inner, bg=BG, padx=HEADER_PAD_X + 2, pady=9)
         self.footer.pack(fill="x")
-        tk.Label(
+        self.help_label = tk.Label(
             self.footer,
-            text="[↑↓] navegar  [↵] aplicar  [esc] fechar",
+            text=tr("footer_hint"),
             bg=BG,
             fg=TEXT_MUTED,
             font=(self.ui_font_family, 8),
             anchor="w",
-        ).pack(side="left", pady=1)
+        )
+        self.help_label.pack(side="left", pady=1)
         self.status_label = tk.Label(self.footer, text="", bg=BG, fg=ACCENT, font=(self.ui_font_family, 8, "bold"))
         self.status_label.pack(side="right")
 
@@ -2547,7 +3142,7 @@ class EffectPalette:
         text_id = canvas.create_text(
             width / 2,
             height / 2,
-            text=cat,
+            text=tr_category(cat),
             font=self.chip_font,
             fill=TEXT_MUTED,
         )
@@ -2694,7 +3289,7 @@ class EffectPalette:
         if self._apply_busy:
             return
         send_debug_command("exportEffects")
-        self.status_label.config(text="Solicitando atualizacao ao Premiere...")
+        self.status_label.config(text=tr("status_requesting_refresh"))
         self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
 
     def _resolve_type_filters(self) -> set[str] | None:
@@ -2717,6 +3312,14 @@ class EffectPalette:
             type_label = "Project"
             icon_kind = "project"
             subtitle = effect.get("treePath") or effect.get("category", "Projeto")
+        elif item_type == "label_color":
+            type_label = "Label"
+            icon_kind = "effect"
+            subtitle = effect.get("labelColor", "")
+        elif item_type == "timeline_action":
+            type_label = "Action"
+            icon_kind = "action"
+            subtitle = effect.get("category", "Timeline")
         elif is_favorite:
             type_label = "Favorite"
             icon_kind = "favorite"
@@ -2733,6 +3336,7 @@ class EffectPalette:
             icon_kind=icon_kind,
             is_favorite=is_favorite,
             accent_kind=filter_key_for_item_type(item_type),
+            accent_color=effect.get("labelColor") if item_type == "label_color" else None,
         )
 
     def _result_row_key(self, payload: dict) -> str:
@@ -2782,7 +3386,11 @@ class EffectPalette:
         return time.monotonic() < self._interactive_until
 
     def _resolve_query_state(self) -> tuple[str, SearchResultSet]:
-        query = self.search_var.get().strip()
+        raw_query = self.search_var.get().strip()
+        query, slash_category, matched = parse_slash_command(raw_query)
+        if matched and slash_category != self._active_category:
+            self._active_category = slash_category
+            self._update_category_pills(immediate=True)
         result_set = self.loader.search(query, type_filters=self._resolve_type_filters())
         return query, result_set
 
@@ -2805,7 +3413,7 @@ class EffectPalette:
     def _apply_results_geometry(self, previous_state: str, row_models: list[ResultRowModel], *, interactive: bool, settled_pass: bool):
         if not row_models:
             self._stable_results_width = self._fixed_search_window_width
-            self._set_view_state("no_results", helper_text="No results", immediate=interactive and not settled_pass)
+            self._set_view_state("no_results", helper_text=tr("no_results_helper"), immediate=interactive and not settled_pass)
             return
 
         self._set_view_state("showing_results")
@@ -2814,7 +3422,7 @@ class EffectPalette:
         self._set_results_height(target_height)
 
     def _update_status_line(self):
-        self.status_label.config(text=f"{self._current_result_set.visible_count}/{self._current_result_set.total_count} resultados")
+        self.status_label.config(text=tr("status_results_count", visible=self._current_result_set.visible_count, total=self._current_result_set.total_count))
 
     def _animate_results_geometry(self, target_results_height: int, target_width: int, *, immediate: bool = False, duration: int = STATE_ANIMATION_MS, easing=ease_in_out_expo):
         target_results_height = int(target_results_height)
@@ -2870,11 +3478,23 @@ class EffectPalette:
     def _refresh_list(self, *, settled_pass: bool = False):
         perf = PerfTimer("refresh_list", enabled=DEBUG_PERF)
         previous_state = self._view_state
-        query, self._current_result_set = self._resolve_query_state()
+        label_filter = parse_label_command(self.search_var.get().strip())
+        if label_filter is not None:
+            items = tuple(build_label_color_items(label_filter))
+            query = label_filter
+            self._current_result_set = SearchResultSet(
+                items=items,
+                match_infos=tuple(MatchInfo(score=0.0, ranges=()) for _ in items),
+                total_count=len(items),
+                visible_count=len(items),
+                query=query,
+            )
+        else:
+            query, self._current_result_set = self._resolve_query_state()
         perf.mark("search")
         self._current_results = list(self._current_result_set.items)
 
-        if not query:
+        if not query and label_filter is None:
             self._current_row_models = []
             self.results_controller.clear()
             self._stable_results_width = self._min_window_width
@@ -2919,12 +3539,14 @@ class EffectPalette:
     def _apply_action_label(self, effect: dict) -> str:
         effect_type = effect.get("type")
         if effect_type in {"project_item", "generic_item", "favorite_item"}:
-            return "Inserindo"
+            return tr("action_inserting")
         if effect_type in {"transition_video", "transition_audio"}:
-            return "Aplicando transicao"
+            return tr("action_applying_transition")
         if effect_type == "preset":
-            return "Aplicando preset"
-        return "Aplicando"
+            return tr("action_applying_preset")
+        if effect_type == "timeline_action":
+            return tr("action_executing")
+        return tr("action_applying")
 
     def _set_apply_busy(self, busy: bool, label: str = ""):
         self._apply_busy = busy
@@ -2951,7 +3573,7 @@ class EffectPalette:
             if elapsed_ms >= APPLY_STATUS_TIMEOUT_MS:
                 self._apply_busy = False
                 self.entry.configure(state="normal")
-                self.status_label.config(text="Premiere nao respondeu")
+                self.status_label.config(text=tr("status_no_response"))
                 beta_report.write_event("apply_timeout", {
                     "name": self._current_apply_effect.get("name", ""),
                     "elapsed_ms": round(elapsed_ms, 2),
@@ -2968,7 +3590,7 @@ class EffectPalette:
         self._apply_busy = False
         self.entry.configure(state="normal")
         if bridge_status_is_success(status):
-            self.status_label.config(text=f"[Aplicado] {effect_name}")
+            self.status_label.config(text=tr("status_applied", name=effect_name))
             beta_report.write_event("apply_completed", {
                 "name": effect_name,
                 "status": status,
@@ -2993,7 +3615,7 @@ class EffectPalette:
         except Exception as exc:
             self._apply_busy = False
             self.entry.configure(state="normal")
-            self.status_label.config(text="Falha ao enviar comando")
+            self.status_label.config(text=tr("status_send_failed"))
             beta_report.log_exception("Apply command failed", exc)
             return
         self._apply_started_at = time.perf_counter()
@@ -3008,6 +3630,83 @@ class EffectPalette:
             self._poll_apply_status,
         )
 
+    def _execute_timeline_action(self, effect: dict) -> bool:
+        if effect.get("action") != "nest":
+            return False
+        if effect.get("nestMode") != "premiere":
+            return False
+        shortcut, shortcut_file = find_premiere_command_shortcut("cmd.clip.nestify")
+        if shortcut is None:
+            self.status_label.config(text=tr("status_shortcut_unavailable"))
+            return True
+        premiere_hwnd = self._previous_foreground_hwnd
+        if not premiere_hwnd:
+            self.status_label.config(text=tr("status_premiere_window_unavailable"))
+            return True
+
+        beta_report.write_event("timeline_action_started", {
+            "action": "nest",
+            "shortcut_vk": shortcut.vk,
+            "shortcut_ctrl": shortcut.ctrl,
+            "shortcut_alt": shortcut.alt,
+            "shortcut_shift": shortcut.shift,
+            "shortcut_file": str(shortcut_file or ""),
+        })
+        watch_timestamp = arm_native_nest_watch(effect)
+        self.hide()
+
+        def focus_then_send():
+            activate_window_handle_native(premiere_hwnd)
+
+            def dispatch():
+                sent = send_native_shortcut(shortcut)
+                beta_report.write_event("timeline_action_dispatched", {"action": "nest", "sent": sent})
+                if not sent:
+                    send_debug_command("cancelNativeNestWatch")
+                else:
+                    schedule_native_nest_dialog_confirmation(
+                        self,
+                        premiere_hwnd,
+                        str(effect.get("nestName", "")),
+                    )
+
+            self.root.after(80, lambda: dispatch_when_native_nest_watch_ready(self, watch_timestamp, dispatch))
+
+        self.root.after(CLOSE_ANIMATION_MS + 40, focus_then_send)
+        return True
+
+    def _execute_label_action(self, effect: dict) -> bool:
+        if effect.get("type") != "label_color":
+            return False
+        label_index = int(effect.get("labelIndex", 0))
+        command_name = f"cmd.edit.label.{label_index}"
+        shortcut, shortcut_file = find_premiere_command_shortcut(command_name)
+        if shortcut is None:
+            self.status_label.config(text=tr("status_label_shortcut_unavailable"))
+            return True
+        premiere_hwnd = self._previous_foreground_hwnd
+        if not premiere_hwnd:
+            self.status_label.config(text=tr("status_premiere_window_unavailable"))
+            return True
+
+        beta_report.write_event("timeline_action_started", {
+            "action": "set_label",
+            "label_index": label_index,
+            "shortcut_vk": shortcut.vk,
+            "shortcut_file": str(shortcut_file or ""),
+        })
+        self.hide()
+
+        def focus_then_send():
+            activate_window_handle_native(premiere_hwnd)
+            self.root.after(80, lambda: beta_report.write_event(
+                "timeline_action_dispatched",
+                {"action": "set_label", "label_index": label_index, "sent": send_native_shortcut(shortcut)},
+            ))
+
+        self.root.after(CLOSE_ANIMATION_MS + 40, focus_then_send)
+        return True
+
     def _apply_selected(self):
         if self._apply_busy:
             return
@@ -3017,14 +3716,144 @@ class EffectPalette:
         if not effect:
             return
 
+        if effect.get("type") == "timeline_action" and effect.get("action") == "nest":
+            self._show_nest_options(effect)
+            return
+        if self._execute_label_action(effect):
+            return
+
         if effect.get("type") in {"transition_video", "transition_audio"}:
             placement = self._choose_transition_placement()
             if not placement:
-                self.status_label.config(text="Aplicacao cancelada")
+                self.status_label.config(text=tr("status_apply_cancelled"))
                 return
             effect = dict(effect)
             effect["transitionPlacement"] = placement
 
+        self._begin_apply(effect)
+
+    def _show_nest_options(self, effect: dict) -> None:
+        self._close_nest_options(restore=False)
+        self._pending_nest_effect = dict(effect)
+        self.entry.configure(state="disabled")
+        self.results_controller.hide()
+        if self.results_state_label.winfo_ismapped():
+            self.results_state_label.pack_forget()
+        self._set_results_chrome_visibility(True)
+        self._set_results_visibility(True, footer_visible=True)
+        self._set_results_height(self._results_expanded_height)
+        self._view_state = "nest_options"
+
+        panel = tk.Frame(self.results_shell, bg=BG, padx=22, pady=16)
+        self._nest_inline_frame = panel
+        panel.pack(fill="both", expand=True)
+
+        tk.Label(
+            panel,
+            text=tr("nest_dialog_question"),
+            bg=BG,
+            fg=TEXT,
+            font=(self.ui_font_family, 11, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+
+        tk.Label(
+            panel,
+            text=tr("nest_name_label"),
+            bg=BG,
+            fg=TEXT_MUTED,
+            font=(self.ui_font_family, 8, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(12, 5))
+        self._nest_inline_name_var = tk.StringVar()
+        name_entry = tk.Entry(
+            panel,
+            textvariable=self._nest_inline_name_var,
+            bg=BG2,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=(self.ui_font_family, 10),
+        )
+        self._nest_inline_name_entry = name_entry
+        name_entry.pack(fill="x", ipady=7)
+        tk.Label(
+            panel,
+            text=tr("nest_name_hint"),
+            bg=BG,
+            fg=TEXT_MUTED,
+            font=(self.ui_font_family, 8),
+            anchor="w",
+        ).pack(fill="x", pady=(5, 12))
+
+        actions = tk.Frame(panel, bg=BG)
+        actions.pack(fill="x")
+        tk.Button(
+            actions,
+            text=tr("nest_cancel"),
+            command=self._cancel_nest_options,
+            bg=BG2,
+            fg=TEXT,
+            relief="flat",
+            padx=14,
+            pady=7,
+        ).pack(side="right")
+        tk.Button(
+            actions,
+            text=tr("nest_confirm"),
+            command=self._confirm_nest_options,
+            bg=ACCENT,
+            fg="#FFFFFF",
+            relief="flat",
+            padx=14,
+            pady=7,
+        ).pack(side="right", padx=(0, 8))
+
+        name_entry.bind("<Return>", lambda _event: self._confirm_nest_options())
+        name_entry.bind("<Escape>", lambda _event: (self._cancel_nest_options(), "break")[-1])
+        self.help_label.config(text=tr("nest_footer_hint"))
+        self.status_label.config(text="")
+        self.root.after_idle(name_entry.focus_force)
+
+    def _close_nest_options(self, *, restore: bool) -> None:
+        panel = getattr(self, "_nest_inline_frame", None)
+        if panel is not None:
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        self._nest_inline_frame = None
+        self._pending_nest_effect = None
+        try:
+            self.entry.configure(state="normal")
+            self.help_label.config(text=tr("footer_hint"))
+        except Exception:
+            pass
+        if restore and self.is_open:
+            self._refresh_list()
+            self.root.after_idle(self.entry.focus_force)
+
+    def _cancel_nest_options(self) -> None:
+        self._close_nest_options(restore=True)
+        self.status_label.config(text=tr("status_apply_cancelled"))
+
+    def _confirm_nest_options(self) -> None:
+        effect = getattr(self, "_pending_nest_effect", None)
+        if not effect:
+            return
+        effect = dict(effect)
+        effect.update({
+            "nestMode": resolve_nest_mode("auto"),
+            "nestName": self._nest_inline_name_var.get().strip(),
+            "nestBin": DEFAULT_NEST_BIN,
+        })
+        self._close_nest_options(restore=True)
+        beta_report.write_event("nest_mode_resolved", {
+            "requested": "auto",
+            "resolved": effect["nestMode"],
+        })
+        if self._execute_timeline_action(effect):
+            return
         self._begin_apply(effect)
 
     def _choose_transition_placement(self) -> str | None:
@@ -3032,7 +3861,7 @@ class EffectPalette:
         self._suspend_focus_out = True
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("Posicao da transicao")
+        dialog.title(tr("transition_dialog_title"))
         dialog.transient(self.root)
         dialog.configure(bg=BG)
         dialog.resizable(False, False)
@@ -3043,7 +3872,7 @@ class EffectPalette:
 
         tk.Label(
             body,
-            text="Onde voce quer aplicar a transicao?",
+            text=tr("transition_dialog_question"),
             bg=BG,
             fg=TEXT,
             font=("Segoe UI", 10, "bold"),
@@ -3052,7 +3881,7 @@ class EffectPalette:
 
         tk.Label(
             body,
-            text="Automatico usa o comportamento atual do Premiere: entre dois clips quando houver corte, ou no fim do clip quando fizer sentido.",
+            text=tr("transition_dialog_auto_desc"),
             bg=BG,
             fg=TEXT_MUTED,
             font=("Segoe UI", 9),
@@ -3084,7 +3913,7 @@ class EffectPalette:
 
         start_btn = tk.Button(
             buttons,
-            text="Inicio",
+            text=tr("transition_dialog_start"),
             command=lambda: choose("start"),
             bg=BG2,
             fg=TEXT,
@@ -3097,7 +3926,7 @@ class EffectPalette:
 
         end_btn = tk.Button(
             buttons,
-            text="Fim",
+            text=tr("transition_dialog_end"),
             command=lambda: choose("end"),
             bg=BG2,
             fg=TEXT,
@@ -3110,7 +3939,7 @@ class EffectPalette:
 
         auto_btn = tk.Button(
             buttons,
-            text="Automatico",
+            text=tr("transition_dialog_auto"),
             command=lambda: choose("auto"),
             bg=ACCENT,
             fg="#FFFFFF",
@@ -3520,6 +4349,9 @@ class EffectPalette:
             })
         if self.is_open:
             return
+        previous = foreground_window_handle_native()
+        if previous:
+            self._previous_foreground_hwnd = previous
         self.tweens.cancel("window_close")
         self._is_closing = False
         self.is_open = True
@@ -3554,6 +4386,8 @@ class EffectPalette:
     def hide(self):
         if self._apply_busy or not self.is_open or self._is_closing:
             return
+        if getattr(self, "_nest_inline_frame", None) is not None:
+            self._close_nest_options(restore=False)
         self.is_open = False
         self._is_closing = True
         self._cancel_focus_out_job()
@@ -3841,7 +4675,7 @@ if HAS_QT:
             self.apply_state(selected=False)
 
         def apply_state(self, *, selected: bool):
-            tokens = get_row_visual_tokens(self.model.accent_kind, selected=selected, hovered=False)
+            tokens = get_row_visual_tokens(self.model.accent_kind, selected=selected, hovered=False, accent_color=self.model.accent_color)
             self.setStyleSheet(
                 f"""
                 QFrame#resultRow {{
@@ -3890,11 +4724,12 @@ if HAS_QT:
         def keyPressEvent(self, event):
             key = event.key()
             if key == QtCore.Qt.Key.Key_Escape:
-                self.palette.hide()
+                if getattr(self.palette, "_nest_inline_panel", None) is not None:
+                    self.palette._cancel_nest_options()
+                else:
+                    self.palette.hide()
                 return
-            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
-                self.palette._apply_selected()
-                return
+
             if key == QtCore.Qt.Key.Key_Down:
                 self.palette._move_selection(1)
                 return
@@ -3995,7 +4830,7 @@ if HAS_QT:
             filters_row.setSpacing(8)
             self.category_buttons: dict[str, QtWidgets.QPushButton] = {}
             for category in ["Todos", "Video", "Audio", "Presets", "Projeto", "Favoritos"]:
-                button = QtWidgets.QPushButton(category)
+                button = QtWidgets.QPushButton(tr_category(category))
                 button.setObjectName("categoryButton")
                 button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
                 button.clicked.connect(lambda _checked=False, c=category: self._on_category_click(c))
@@ -4011,11 +4846,12 @@ if HAS_QT:
             self.body_card = QtWidgets.QFrame()
             self.body_card.setObjectName("bodyCard")
             body_layout = QtWidgets.QVBoxLayout(self.body_card)
+            self.body_layout = body_layout
             body_layout.setContentsMargins(8, 8, 8, 8)
             body_layout.setSpacing(0)
             root_layout.addWidget(self.body_card)
 
-            self.empty_label = QtWidgets.QLabel("No results")
+            self.empty_label = QtWidgets.QLabel(tr("no_results_helper"))
             self.empty_label.setObjectName("emptyLabel")
             self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.results_list = QtWidgets.QListWidget()
@@ -4025,6 +4861,7 @@ if HAS_QT:
             self.results_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.results_list.currentRowChanged.connect(self._sync_row_selection)
             self.results_list.itemDoubleClicked.connect(lambda _item: self._apply_selected())
+            self.results_list.itemActivated.connect(lambda _item: self._apply_selected())
             body_layout.addWidget(self.empty_label)
             body_layout.addWidget(self.results_list)
 
@@ -4032,7 +4869,7 @@ if HAS_QT:
             self.footer.setObjectName("footer")
             footer_layout = QtWidgets.QHBoxLayout(self.footer)
             footer_layout.setContentsMargins(16, 9, 16, 9)
-            self.help_label = QtWidgets.QLabel("Up/Down navegar   Enter aplicar   ESC fechar")
+            self.help_label = QtWidgets.QLabel(tr("footer_hint"))
             self.help_label.setObjectName("helpLabel")
             self.status_label = QtWidgets.QLabel("")
             self.status_label.setObjectName("statusLabel")
@@ -4217,10 +5054,26 @@ if HAS_QT:
 
         def _refresh_list(self):
             self._search_job = None
-            query = self.entry.text().strip()
-            self._current_result_set = self.loader.search(query, type_filters=self._resolve_type_filters())
+            raw_query = self.entry.text().strip()
+            label_filter = parse_label_command(raw_query)
+            if label_filter is not None:
+                items = tuple(build_label_color_items(label_filter))
+                query = label_filter
+                self._current_result_set = SearchResultSet(
+                    items=items,
+                    match_infos=tuple(MatchInfo(score=0.0, ranges=()) for _ in items),
+                    total_count=len(items),
+                    visible_count=len(items),
+                    query=query,
+                )
+            else:
+                query, slash_category, matched = parse_slash_command(raw_query)
+                if matched and slash_category != self._active_category:
+                    self._active_category = slash_category
+                    self._update_category_buttons()
+                self._current_result_set = self.loader.search(query, type_filters=self._resolve_type_filters())
             self._current_results = list(self._current_result_set.items)
-            if not query:
+            if not query and label_filter is None:
                 self._cancel_render_chunk()
                 self._current_row_models = []
                 self._row_widgets = []
@@ -4231,12 +5084,12 @@ if HAS_QT:
                 return
             self._current_row_models = [self._build_result_row_model(effect) for effect in self._current_results]
             if not self._current_row_models:
-                self.status_label.setText("0 resultados")
+                self.status_label.setText(tr("status_no_results"))
                 self._set_message_state()
                 self._resize_to_content()
                 return
             self._populate_results()
-            self.status_label.setText(f"{self._current_result_set.visible_count}/{self._current_result_set.total_count} resultados")
+            self.status_label.setText(tr("status_results_count", visible=self._current_result_set.visible_count, total=self._current_result_set.total_count))
             self._set_results_state()
             self._resize_to_content()
 
@@ -4327,12 +5180,14 @@ if HAS_QT:
         def _apply_action_label(self, effect: dict) -> str:
             effect_type = effect.get("type")
             if effect_type in {"project_item", "generic_item", "favorite_item"}:
-                return "Inserindo"
+                return tr("action_inserting")
             if effect_type in {"transition_video", "transition_audio"}:
-                return "Aplicando transicao"
+                return tr("action_applying_transition")
             if effect_type == "preset":
-                return "Aplicando preset"
-            return "Aplicando"
+                return tr("action_applying_preset")
+            if effect_type == "timeline_action":
+                return tr("action_executing")
+            return tr("action_applying")
 
         def _set_apply_busy(self, busy: bool, label: str = ""):
             self._apply_busy = busy
@@ -4365,7 +5220,7 @@ if HAS_QT:
                 effect_name = self._current_apply_effect.get("name", "")
             self.apply_progress.hide()
             if bridge_status_is_success(status):
-                self.status_label.setText(f"[Aplicado] {effect_name}")
+                self.status_label.setText(tr("status_applied", name=effect_name))
                 beta_report.write_event("apply_completed", {
                     "name": effect_name,
                     "status": status,
@@ -4423,7 +5278,7 @@ if HAS_QT:
                     self.refresh_btn.setEnabled(True)
                     for button in self.category_buttons.values():
                         button.setEnabled(True)
-                    self.status_label.setText("Premiere nao respondeu")
+                    self.status_label.setText(tr("status_no_response"))
                     beta_report.write_event("apply_timeout", {
                         "name": self._current_apply_effect.get("name", ""),
                         "elapsed_ms": round(elapsed_ms, 2),
@@ -4447,7 +5302,7 @@ if HAS_QT:
                 self.refresh_btn.setEnabled(True)
                 for button in self.category_buttons.values():
                     button.setEnabled(True)
-                self.status_label.setText("Falha ao enviar comando")
+                self.status_label.setText(tr("status_send_failed"))
                 beta_report.log_exception("Apply command failed", exc)
                 return
             self._apply_started_at = time.perf_counter()
@@ -4462,30 +5317,204 @@ if HAS_QT:
                 self._poll_apply_status,
             )
 
+        def _show_nest_options(self, effect: dict) -> None:
+            self._close_nest_options(restore=False)
+            self._pending_nest_effect = dict(effect)
+            self.entry.setEnabled(False)
+            self.results_list.hide()
+            self.empty_label.hide()
+
+            panel = QtWidgets.QFrame()
+            panel.setObjectName("nestInlinePanel")
+            panel.setFixedHeight(170)
+            panel.setStyleSheet(
+                f"""
+                QFrame#nestInlinePanel {{ background: {BG}; border: 0; }}
+                QLabel#nestHeading {{ color: {TEXT}; font-size: 15px; font-weight: 700; }}
+                QLabel#nestFieldLabel {{ color: {TEXT_MUTED}; font-size: 11px; font-weight: 700; }}
+                QLineEdit#nestName {{
+                    background: {BG2}; color: {TEXT}; border: 1px solid {BORDER};
+                    border-radius: 7px; padding: 8px 10px; selection-background-color: {ACCENT};
+                }}
+                QPushButton {{
+                    background: {BG2}; color: {TEXT}; border: 1px solid {BORDER};
+                    border-radius: 7px; padding: 7px 13px;
+                }}
+                QPushButton#nestConfirm {{
+                    background: {ACCENT}; color: white; border-color: {ACCENT}; font-weight: 700;
+                }}
+                """
+            )
+            self._nest_inline_panel = panel
+            layout = QtWidgets.QVBoxLayout(panel)
+            layout.setContentsMargins(18, 14, 18, 12)
+            layout.setSpacing(7)
+
+            heading = QtWidgets.QLabel(tr("nest_dialog_question"))
+            heading.setObjectName("nestHeading")
+            layout.addWidget(heading)
+
+            name_label = QtWidgets.QLabel(tr("nest_name_label"))
+            name_label.setObjectName("nestFieldLabel")
+            layout.addWidget(name_label)
+            name_entry = QtWidgets.QLineEdit()
+            name_entry.setObjectName("nestName")
+            name_entry.setPlaceholderText(tr("nest_name_hint"))
+            name_entry.returnPressed.connect(self._confirm_nest_options)
+            self._nest_inline_name_entry = name_entry
+            layout.addWidget(name_entry)
+
+            actions = QtWidgets.QHBoxLayout()
+            actions.addStretch(1)
+            cancel_button = QtWidgets.QPushButton(tr("nest_cancel"))
+            confirm_button = QtWidgets.QPushButton(tr("nest_confirm"))
+            confirm_button.setObjectName("nestConfirm")
+            cancel_button.clicked.connect(self._cancel_nest_options)
+            confirm_button.clicked.connect(self._confirm_nest_options)
+            actions.addWidget(cancel_button)
+            actions.addWidget(confirm_button)
+            layout.addLayout(actions)
+
+            footer_index = self.body_layout.indexOf(self.footer)
+            self.body_layout.insertWidget(footer_index, panel)
+            self._qt_middle_height = 170
+            self.body_card.show()
+            self.help_label.setText(tr("nest_footer_hint"))
+            self.status_label.setText("")
+            self._resize_to_content()
+            name_entry.setFocus()
+
+        def _close_nest_options(self, *, restore: bool) -> None:
+            panel = getattr(self, "_nest_inline_panel", None)
+            if panel is not None:
+                self.body_layout.removeWidget(panel)
+                panel.deleteLater()
+            self._nest_inline_panel = None
+            self._pending_nest_effect = None
+            self.entry.setEnabled(True)
+            self.help_label.setText(tr("footer_hint"))
+            if restore and self.is_open:
+                self._refresh_list()
+                self.entry.setFocus()
+
+        def _cancel_nest_options(self) -> None:
+            self._close_nest_options(restore=True)
+            self.status_label.setText(tr("status_apply_cancelled"))
+
+        def _confirm_nest_options(self) -> None:
+            effect = getattr(self, "_pending_nest_effect", None)
+            if not effect:
+                return
+            effect = dict(effect)
+            effect.update({
+                "nestMode": resolve_nest_mode("auto"),
+                "nestName": self._nest_inline_name_entry.text().strip(),
+                "nestBin": DEFAULT_NEST_BIN,
+            })
+            self._close_nest_options(restore=True)
+            beta_report.write_event("nest_mode_resolved", {
+                "requested": "auto",
+                "resolved": effect["nestMode"],
+            })
+            if self._execute_timeline_action(effect):
+                return
+            self._begin_apply(effect)
+
+        def _execute_timeline_action(self, effect: dict) -> bool:
+            if effect.get("action") != "nest":
+                return False
+            if effect.get("nestMode") != "premiere":
+                return False
+            shortcut, shortcut_file = find_premiere_command_shortcut("cmd.clip.nestify")
+            if shortcut is None:
+                self.status_label.setText(tr("status_shortcut_unavailable"))
+                return True
+            premiere_hwnd = self._previous_foreground_hwnd
+            if not premiere_hwnd:
+                self.status_label.setText(tr("status_premiere_window_unavailable"))
+                return True
+
+            beta_report.write_event("timeline_action_started", {
+                "action": "nest",
+                "shortcut_vk": shortcut.vk,
+                "shortcut_ctrl": shortcut.ctrl,
+                "shortcut_alt": shortcut.alt,
+                "shortcut_shift": shortcut.shift,
+                "shortcut_file": str(shortcut_file or ""),
+            })
+            watch_timestamp = arm_native_nest_watch(effect)
+            self.hide()
+
+            def focus_then_send():
+                activate_window_handle_native(premiere_hwnd)
+
+                def dispatch():
+                    sent = send_native_shortcut(shortcut)
+                    beta_report.write_event("timeline_action_dispatched", {"action": "nest", "sent": sent})
+                    if not sent:
+                        send_debug_command("cancelNativeNestWatch")
+                    else:
+                        schedule_native_nest_dialog_confirmation(
+                            self,
+                            premiere_hwnd,
+                            str(effect.get("nestName", "")),
+                        )
+
+                self.root.after(80, lambda: dispatch_when_native_nest_watch_ready(self, watch_timestamp, dispatch))
+
+            self.root.after(CLOSE_ANIMATION_MS + 40, focus_then_send)
+            return True
+
+        def _execute_label_action(self, effect: dict) -> bool:
+            if effect.get("type") != "label_color":
+                return False
+            label_index = int(effect.get("labelIndex", 0))
+            command_name = f"cmd.edit.label.{label_index}"
+            shortcut, shortcut_file = find_premiere_command_shortcut(command_name)
+            if shortcut is None:
+                self.status_label.setText(tr("status_label_shortcut_unavailable"))
+                return True
+            premiere_hwnd = self._previous_foreground_hwnd
+            if not premiere_hwnd:
+                self.status_label.setText(tr("status_premiere_window_unavailable"))
+                return True
+
+            beta_report.write_event("timeline_action_started", {
+                "action": "set_label",
+                "label_index": label_index,
+                "shortcut_vk": shortcut.vk,
+                "shortcut_file": str(shortcut_file or ""),
+            })
+            self.hide()
+
+            def focus_then_send():
+                activate_window_handle_native(premiere_hwnd)
+                self.root.after(80, lambda: beta_report.write_event(
+                    "timeline_action_dispatched",
+                    {"action": "set_label", "label_index": label_index, "sent": send_native_shortcut(shortcut)},
+                ))
+
+            self.root.after(CLOSE_ANIMATION_MS + 40, focus_then_send)
+            return True
+
         def _apply_selected(self):
             if self._apply_busy or self._apply_finishing:
                 return
             effect = self._selected_payload()
             if not effect:
                 return
-            if preset_has_keyframes(effect):
-                selection = load_current_selection(self.loader.paths)
-                if selection_has_infinite_warning_targets(selection):
-                    result = QtWidgets.QMessageBox.question(
-                        self.window,
-                        "Aviso sobre keyframes",
-                        "Este preset possui keyframes e a selecao atual inclui uma Adjustment Layer ou uma imagem.\n\nDeseja aplicar mesmo assim?",
-                    )
-                    if result != QtWidgets.QMessageBox.StandardButton.Yes:
-                        self.status_label.setText("Aplicacao cancelada")
-                        return
+            if effect.get("type") == "timeline_action" and effect.get("action") == "nest":
+                self._show_nest_options(effect)
+                return
+            if self._execute_label_action(effect):
+                return
             self._begin_apply(effect)
 
         def _manual_refresh(self):
             if self._apply_busy or self._apply_finishing:
                 return
             send_debug_command("exportEffects")
-            self.status_label.setText("Solicitando atualizacao ao Premiere...")
+            self.status_label.setText(tr("status_requesting_refresh"))
             self.loader.request_refresh(self.root, self._on_loader_snapshot_ready, force=True)
 
         def _on_loader_snapshot_ready(self, snapshot: LoaderSnapshot):
@@ -4590,8 +5619,6 @@ if HAS_QT:
                 + body_extra
             )
             self.window.setFixedSize(FIXED_SEARCH_WINDOW_WIDTH, target_height)
-            if self.is_open:
-                self._anchor_window_to_pointer()
 
         def _window_hwnd(self) -> int | None:
             if self._native_hwnd:
@@ -4685,8 +5712,8 @@ if HAS_QT:
             self.results_list.clear()
             self.status_label.setText("")
             self._set_idle_state()
-            self._anchor_window_to_pointer()
             self.window.setFixedSize(FIXED_SEARCH_WINDOW_WIDTH, self._idle_window_height)
+            self._anchor_window_to_pointer()
             self.window.setWindowOpacity(0.92)
             self.window.show()
             self._force_focus_attempt()
@@ -4697,6 +5724,8 @@ if HAS_QT:
                 return
             if not self.is_open:
                 return
+            if getattr(self, "_nest_inline_panel", None) is not None:
+                self._close_nest_options(restore=False)
             self.is_open = False
             self._cancel_focus_attempts()
 
@@ -5078,6 +6107,16 @@ class SystemTrayController:
     def _show_debug(self, icon=None, item=None):
         self._run_on_tk(self.debug.show)
 
+    def _set_language(self, lang: str):
+        if lang == CURRENT_LANGUAGE:
+            return
+        set_language(lang)
+        if self.icon is not None:
+            try:
+                self.icon.notify(tr("tray_language_restart_body"), tr("tray_language_restart_title"))
+            except Exception:
+                pass
+
     def _generate_beta_report(self, icon=None, item=None):
         def create_report():
             try:
@@ -5143,14 +6182,32 @@ class SystemTrayController:
 
         try:
             menu = pystray.Menu(
-                pystray.MenuItem("Abrir paleta", self._show_palette, default=True),
-                pystray.MenuItem("Mostrar/Ocultar paleta", self._toggle_palette),
-                pystray.MenuItem("Janela de debug", self._show_debug),
+                pystray.MenuItem(tr("tray_open_palette"), self._show_palette, default=True),
+                pystray.MenuItem(tr("tray_toggle_palette"), self._toggle_palette),
+                pystray.MenuItem(tr("tray_debug_window"), self._show_debug),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Gerar relatorio beta", self._generate_beta_report),
-                pystray.MenuItem("Abrir pasta de relatorios", self._open_report_folder),
+                pystray.MenuItem(
+                    tr("tray_language"),
+                    pystray.Menu(
+                        pystray.MenuItem(
+                            tr("tray_language_en"),
+                            lambda: self._set_language("en"),
+                            checked=lambda item: CURRENT_LANGUAGE == "en",
+                            radio=True,
+                        ),
+                        pystray.MenuItem(
+                            tr("tray_language_pt"),
+                            lambda: self._set_language("pt"),
+                            checked=lambda item: CURRENT_LANGUAGE == "pt",
+                            radio=True,
+                        ),
+                    ),
+                ),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Sair", self._quit),
+                pystray.MenuItem(tr("tray_generate_beta_report"), self._generate_beta_report),
+                pystray.MenuItem(tr("tray_open_report_folder"), self._open_report_folder),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(tr("tray_quit"), self._quit),
             )
             self.icon = pystray.Icon("FX.palette", self._make_icon_image(), "FX.palette", menu)
             self._thread = threading.Thread(target=self.icon.run, daemon=True)
@@ -5412,6 +6469,10 @@ def create_debug_window(palette):
 # â”€â”€â”€ Ponto de entrada â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main():
+    if not acquire_single_instance_lock():
+        print("[App] FX.palette ja esta em execucao")
+        return
+
     print("=" * 52)
     print("  Premiere Pro FX.palette")
     print(f"  Atalho     : Ctrl+Espaco")
@@ -5442,6 +6503,7 @@ def main():
         tray.stop()
         palette.shutdown()
         hotkey.stop()
+        release_single_instance_lock()
 
 
 if __name__ == "__main__":

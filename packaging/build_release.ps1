@@ -122,10 +122,29 @@ Copy-FileToStage "bridge.js"
 Copy-FileToStage "index.html"
 Copy-FileToStage "worker.html"
 Copy-FileToStage "README.md"
-Copy-FileToStage "RELATORIO_EFFECT_PALETTE.md"
+Copy-FileToStage "LICENSE.md"
 Copy-DirToStage "CSXS"
 Copy-DirToStage "lib"
 Copy-DirToStage "scripts"
+
+Write-Step "Minifying shipped bridge.js and host.jsx"
+# CEP loads these as plain text (no compile step like the Python side gets from
+# PyInstaller), so they're readable by anyone who installs the extension no
+# matter what we do. Minifying/mangling local variable names and stripping
+# comments raises the bar for casual copy-paste cloning without being a false
+# sense of security. Top-level function names are deliberately left untouched
+# (terser's default: only "mangle", not "mangle --toplevel") because bridge.js
+# invokes host.jsx functions by constructing name strings like
+# 'applyPresetWithSelection(...)' and evaluating them — renaming those would
+# break the app.
+function Invoke-Minify($StagedRelativePath, $Ecma) {
+    $target = Join-Path $StageDir $StagedRelativePath
+    $tempOut = "$target.min"
+    Invoke-Checked "npx" @("--yes", "terser@5.49.0", $target, "--compress", "--mangle", "--ecma", $Ecma, "--comments", "false", "--output", $tempOut)
+    Move-Item -LiteralPath $tempOut -Destination $target -Force
+}
+Invoke-Minify "bridge.js" "2020"
+Invoke-Minify "scripts\host.jsx" "5"
 
 Write-Step "Copying clean data templates"
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "data") | Out-Null
